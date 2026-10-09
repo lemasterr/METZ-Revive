@@ -37,11 +37,11 @@ class CaptureTests(unittest.TestCase):
 
 
 class CollectionGuards(unittest.TestCase):
-    def run_main(self, root, state, label="sample"):
+    def run_main(self, root, state, label="sample", profile="audio"):
         patches = [
             patch.object(collector, "ROOT", Path(root)),
             patch.object(collector.shutil, "which", return_value="adb"),
-            patch.object(sys, "argv", [str(SCRIPT), "--serial", "test-device", "--profile", "audio", "--label", label]),
+            patch.object(sys, "argv", [str(SCRIPT), "--serial", "test-device", "--profile", profile, "--label", label]),
             patch.object(collector, "capture", return_value=state),
         ]
         with contextlib.ExitStack() as stack:
@@ -90,6 +90,26 @@ class CollectionGuards(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.run_main(folder, {"returncode": 0, "stdout": "device"}, "../public")
             self.assertFalse((Path(folder) / "local").exists())
+
+    def test_remote_snapshot_does_not_inject_input_or_reset_frame_history(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old_umask = collector.os.umask(0o077)
+            try:
+                mocked = self.run_main(folder, {
+                    "returncode": 0, "stdout": "device", "timed_out": False, "truncated": False,
+                }, profile="remote")
+            finally:
+                collector.os.umask(old_umask)
+            commands = [call.args[0][4] for call in mocked.call_args_list[1:]]
+            self.assertIn("dumpsys input", commands)
+            self.assertTrue(any("pidof dev.vodik7.atvtoolsserver:i" in command for command in commands))
+            for command in commands:
+                self.assertNotRegex(command, r"(^|[;&|]\s*)(input\s|am\s|reboot\b|logcat\s+-c\b)")
+                self.assertNotIn("reset", command)
+            snapshot = json.loads((Path(folder) / "local/diagnostics/sample.json").read_text())
+            self.assertEqual(snapshot["profile"], "remote")
+            self.assertIn("input_dispatch", snapshot["results"])
+            self.assertIn("home_frames", snapshot["results"])
 
 
 if __name__ == "__main__":

@@ -53,6 +53,19 @@ AUDIO = [(name, command) for name, command in BASELINE if name in {
 VIDEO = [(name, command) for name, command in BASELINE if name in {
     "identity", "cpu_load", "load_interval", "memory", "thermal", "media", "network", "errors"
 }]
+REMOTE = [(name, command) for name, command in BASELINE if name in {
+    "identity", "power", "errors"
+}] + [
+    ("memory", "cat /proc/meminfo"),
+    ("load_interval", "echo BEGIN; cat /proc/uptime /proc/stat; sleep 3; echo END; cat /proc/uptime /proc/stat"),
+    ("foreground", "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity|mFocusedApp'"),
+    ("input_dispatch", "dumpsys input"),
+    ("last_anr", "dumpsys activity lastanr"),
+    # The helper can run as a shell process outside ActivityManager's app registry.
+    ("phone_helper", "dumpsys package dev.vodik7.atvtoolsserver; ps -A -o USER,PID,PPID,NAME | grep -E 'vodik|adbd'; for pid in $(pidof dev.vodik7.atvtoolsserver:i); do dumpsys meminfo $pid; done"),
+    ("wifi_status", "cmd wifi status"),
+    ("home_frames", "dumpsys gfxinfo com.google.android.tvlauncher framestats"),
+]
 
 
 def capture(arguments, timeout=20):
@@ -106,7 +119,7 @@ def capture(arguments, timeout=20):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", required=True, help="Explicit ADB target; never stored in public configuration")
-    parser.add_argument("--profile", choices=("baseline", "audio", "video"), default="baseline")
+    parser.add_argument("--profile", choices=("baseline", "audio", "video", "remote"), default="baseline")
     parser.add_argument("--label", required=True, help="Local snapshot name, e.g. normal or distorted-audio")
     args = parser.parse_args()
     if not args.label or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for c in args.label):
@@ -123,7 +136,7 @@ def main():
     destination = folder / (args.label + ".json")
     if destination.exists():
         parser.error("snapshot already exists; choose a distinct condition label to preserve evidence")
-    commands = {"baseline": BASELINE, "audio": AUDIO, "video": VIDEO}[args.profile]
+    commands = {"baseline": BASELINE, "audio": AUDIO, "video": VIDEO, "remote": REMOTE}[args.profile]
     snapshot = {"profile": args.profile, "label": args.label, "started_utc": datetime.now(timezone.utc).isoformat(), "results": {}}
     with destination.open("x", encoding="utf-8") as output:
         os.chmod(destination, 0o600)
