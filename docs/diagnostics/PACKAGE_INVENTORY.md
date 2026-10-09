@@ -9,13 +9,13 @@ PSS указан в КиБ ровно как в одном `meminfo`; это н�
 | Пакет / назначение | Факт / ресурсы | Можно ли отключать сейчас, последствия и возврат |
 |---|---|---|
 | `com.google.android.tvlauncher` — штатный HOME | HOME resolver подтверждён; PSS 46656 | Нет. Потеря HOME; сохранить до ручной проверки METZ Home. Возврат HOME — план в recovery |
-| `com.google.android.tvrecommendations` — TV recommendations | PSS 17088, системный обновлённый пакет | Категория B: связь с launcher/channels требует проверки. Возможна потеря рекомендаций; вернуть исходное enabled-state |
-| `com.smartdevice.leanbacklauncher.customizer` — vendor HOME customizer | PSS 4159, shared UID 1000 | Категория B: возможная интеграция OEM-каналов/launcher. До анализа связей не отключать; нужен возврат state |
+| `com.google.android.tvrecommendations` — TV recommendations | Первичный PSS 17088; новый 13641. UID 10005; notification listener связан с system | Только согласованная проба: возможная потеря рекомендаций, каналов и уведомлений. Исходный enabled=0; возврат default-state. [План](PERFORMANCE_PLAN.md) |
+| `com.smartdevice.leanbacklauncher.customizer` — vendor HOME customizer | Первичный PSS 4159, shared UID 1000; recommendations использует его ConfigurationProvider | Сохранить: подтверждена интеграция конфигурации HOME; не отключать одновременно с recommendations |
 | `tv.anoki.acr.controller` — ACR controller по имени пакета | PSS 12496, SYSTEM/PERSISTENT, INTERNET permission | Категория B: назначение и функция ACR не прослежены до пользователя/контента. Не считать доказанным единственным источником рекламы; возврат state до пробы |
 | `fusion.android.tv.demo` — vendor demo | PSS 4750, shared UID 1000 | Категория B: возможные TV demo/картинка; низкая измеренная доля памяти. Сначала receivers/зависимости, потом точный возврат |
 | `com.smartdevice.common.demonow` — предустановленный demo по имени | Установлен; отдельный расход не измерен | Категория B: неизвестные зависимости; не удалять по имени. Сохранить/вернуть исходное state |
 | `com.tcl.browser` — TCL Browser | Пользователь сообщил о тормозах и лишних элементах; отдельно разрешил удаление | Удалён для user 0 с `-k`; нет в обычном package list, Leanback activity не разрешается. APK/splits сохранены локально; данные не экспортированы и восстановление ещё не испытано |
-| `com.phlox.tvwebbrowser` — TV Bro | Установлен по отдельному согласию, 2.1.6 / code 69, WebView, 32-битный ARM | Сохранить. Подпись/хеш и установка проверены; скорость, RAM и UI не проверены |
+| `com.phlox.tvwebbrowser` — TV Bro | 2.1.6 / code 69, WebView, 32-битный ARM | Сохранить. Подпись/хеш и установка проверены; пользователь сообщил о ручной проверке. Замеры скорости/RAM не предоставлены |
 | `com.kick.mobile` — пользовательское приложение Kick | Пользователь подтвердил использование; отдельная нагрузка не измерена | Сохранить. Не является кандидатом очистки |
 | `tv.twitch.android.app` — Twitch | User package, версия 13.0.0.2; не активен в сценарии | Сохранить: пользовательская целевая функция. Нужна диагностика активного потока |
 | `dev.vodik7.atvtoolsserver` — helper atvTools | User package, версия 1.4.1, процесс `:i`, PSS 22317 | Сохранить: пользователь управляет через atvTools. Отключение может ухудшить пульт; пользу удаления не измеряли |
