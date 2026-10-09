@@ -66,6 +66,17 @@ REMOTE = [(name, command) for name, command in BASELINE if name in {
     ("wifi_status", "cmd wifi status"),
     ("home_frames", "dumpsys gfxinfo com.google.android.tvlauncher framestats"),
 ]
+CAST = [
+    ("identity", "getprop ro.build.fingerprint; getprop ro.build.version.sdk"),
+    ("cast_package", "dumpsys package com.google.android.apps.mediashell"),
+    ("cast_services", "dumpsys activity services com.google.android.apps.mediashell"),
+    ("cast_process", "pidof com.google.android.apps.mediashell"),
+    ("cast_listeners", "ss -ltn"),
+    ("memory", "cat /proc/meminfo"),
+    ("wifi_status", "cmd wifi status"),
+    ("media", "dumpsys media.metrics | tail -n 120"),
+    ("cast_events", "logcat -d -b main -b system -t 300 -v threadtime 'CastReceiverService:W' 'CastMirroring:W' 'chromium:W' '*:S'"),
+]
 
 
 def capture(arguments, timeout=20):
@@ -119,7 +130,7 @@ def capture(arguments, timeout=20):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", required=True, help="Explicit ADB target; never stored in public configuration")
-    parser.add_argument("--profile", choices=("baseline", "audio", "video", "remote"), default="baseline")
+    parser.add_argument("--profile", choices=("baseline", "audio", "video", "remote", "cast"), default="baseline")
     parser.add_argument("--label", required=True, help="Local snapshot name, e.g. normal or distorted-audio")
     args = parser.parse_args()
     if not args.label or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for c in args.label):
@@ -136,7 +147,7 @@ def main():
     destination = folder / (args.label + ".json")
     if destination.exists():
         parser.error("snapshot already exists; choose a distinct condition label to preserve evidence")
-    commands = {"baseline": BASELINE, "audio": AUDIO, "video": VIDEO, "remote": REMOTE}[args.profile]
+    commands = {"baseline": BASELINE, "audio": AUDIO, "video": VIDEO, "remote": REMOTE, "cast": CAST}[args.profile]
     snapshot = {"profile": args.profile, "label": args.label, "started_utc": datetime.now(timezone.utc).isoformat(), "results": {}}
     with destination.open("x", encoding="utf-8") as output:
         os.chmod(destination, 0o600)

@@ -111,6 +111,24 @@ class CollectionGuards(unittest.TestCase):
             self.assertIn("input_dispatch", snapshot["results"])
             self.assertIn("home_frames", snapshot["results"])
 
+    def test_cast_snapshot_reads_services_without_starting_a_session(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old_umask = collector.os.umask(0o077)
+            try:
+                mocked = self.run_main(folder, {
+                    "returncode": 0, "stdout": "device", "timed_out": False, "truncated": False,
+                }, profile="cast")
+            finally:
+                collector.os.umask(old_umask)
+            commands = [call.args[0][4] for call in mocked.call_args_list[1:]]
+            self.assertIn("dumpsys activity services com.google.android.apps.mediashell", commands)
+            self.assertIn("ss -ltn", commands)
+            for command in commands:
+                self.assertNotRegex(command, r"(^|[;&|]\s*)(input\s|am\s|reboot\b|logcat\s+-c\b|pm\s+(disable|enable)|cmd\s+.*start)")
+            snapshot = json.loads((Path(folder) / "local/diagnostics/sample.json").read_text())
+            self.assertEqual(snapshot["profile"], "cast")
+            self.assertIn("cast_services", snapshot["results"])
+
 
 if __name__ == "__main__":
     unittest.main()

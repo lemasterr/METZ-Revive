@@ -18,6 +18,12 @@
     <string name="columns_3">3 приложения в ряду — крупнее</string>
     <string name="columns_4">4 приложения в ряду</string>
     <string name="columns_5">5 приложений в ряду — компактнее</string>
-    <string name="navigation_hint">Стрелки — выбор · Enter — открыть · Назад — вернуться</string>
+    <string name="home_page">Главная</string>
+    <string name="apps_page">Приложения</string>
+    <string name="search_apps">Поиск приложений</string>
+    <string name="no_favorites">Добавьте любимые приложения со страницы «Приложения».</string>
+    <string name="no_search_results">Ничего не найдено.</string>
+    <string name="add_favorite">Добавить %1$s на главную</string>
+    <string name="remove_favorite">Убрать %1$s с главной</string>
     <string name="close">Закрыть</string>
 </resources>
