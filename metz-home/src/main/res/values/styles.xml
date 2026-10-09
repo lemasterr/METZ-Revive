@@ -1,0 +1,17 @@
+<resources>
+    <color name="background">#111418</color>
+    <color name="surface">#20262E</color>
+    <color name="text">#F3F5F7</color>
+    <color name="muted">#ABB4C0</color>
+    <color name="focus">#A9D7FF</color>
+    <style name="HomeTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:colorBackground">@color/background</item>
+        <item name="android:textColorPrimary">@color/text</item>
+        <item name="android:textColorSecondary">@color/muted</item>
+        <item name="android:colorAccent">@color/focus</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>

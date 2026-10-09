@@ -1,0 +1,23 @@
+<resources>
+    <string name="app_name">METZ Home</string>
+    <string name="refresh">Обновить</string>
+    <string name="settings">Настройки</string>
+    <string name="stock_home">Штатный HOME</string>
+    <string name="loading">Загрузка приложений…</string>
+    <string name="empty">Нет доступных приложений. Попробуйте «Обновить» или откройте настройки телевизора.</string>
+    <string name="load_failed">Не удалось получить приложения. Повторите «Обновить».</string>
+    <string name="launch_failed">Приложение недоступно. Обновите список.</string>
+    <string name="settings_failed">Эти настройки недоступны на телевизоре.</string>
+    <string name="stock_failed">Штатный HOME недоступен. Откройте настройки главного экрана.</string>
+    <string name="tv_settings">Настройки телевизора</string>
+    <string name="choose_home">Использовать METZ Home</string>
+    <string name="enable_home_message">Добавить METZ Home в выбор главного экрана? Затем выберите его в настройках Android. Штатный HOME сохранится; к нему можно вернуться.</string>
+    <string name="enable_home">Продолжить</string>
+    <string name="cancel">Отмена</string>
+    <string name="grid_size">Размер сетки</string>
+    <string name="columns_3">3 приложения в ряду — крупнее</string>
+    <string name="columns_4">4 приложения в ряду</string>
+    <string name="columns_5">5 приложений в ряду — компактнее</string>
+    <string name="navigation_hint">Стрелки — выбор · Enter — открыть · Назад — вернуться</string>
+    <string name="close">Закрыть</string>
+</resources>

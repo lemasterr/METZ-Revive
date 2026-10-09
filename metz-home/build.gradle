@@ -1,0 +1,53 @@
+buildscript {
+    repositories { google(); mavenCentral() }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.12.0'
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.20'
+    }
+}
+
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+repositories { google(); mavenCentral() }
+
+// Pin the cached annotations used by the compiler; avoid fetching an older transitive jar.
+configurations.configureEach {
+    resolutionStrategy.force 'org.jetbrains:annotations:23.0.0'
+}
+
+android {
+    namespace 'com.metzrevive.home'
+    compileSdk 36
+    buildToolsVersion '35.0.0'
+    defaultConfig {
+        applicationId 'com.metzrevive.home'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions { jvmTarget = '1.8' }
+    buildTypes {
+        debug {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+        }
+        release {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+        }
+    }
+}
+
+// Pure JVM behavior checks; this does not start an emulator or interact with a TV.
+tasks.register('checkCatalog', JavaExec) {
+    dependsOn 'compileDebugUnitTestKotlin'
+    mainClass = 'com.metzrevive.home.CatalogCheckKt'
+    classpath = files('build/tmp/kotlin-classes/debugUnitTest', 'build/tmp/kotlin-classes/debug') +
+        configurations.debugUnitTestRuntimeClasspath
+}
