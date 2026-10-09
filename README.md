@@ -1,1 +1,1 @@
-# METZ-Home
+# METZ
