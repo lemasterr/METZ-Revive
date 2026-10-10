@@ -1,4 +1,10 @@
 <resources>
+    <string name="previous_page">Предыдущая страница</string>
+    <string name="next_page">Следующая страница</string>
+    <string name="page_number">%1$d / %2$d · удерживайте OK для избранного</string>
+    <string name="settings_intro">Телевизор, трансляция и главный экран</string>
+    <string name="find">Найти</string>
+    <string name="clear_search">Сбросить поиск</string>
     <string name="app_name">METZ Home</string>
     <string name="refresh">Обновить</string>
     <string name="settings">Настройки</string>
@@ -20,10 +26,20 @@
     <string name="columns_5">5 приложений в ряду — компактнее</string>
     <string name="home_page">Главная</string>
     <string name="apps_page">Приложения</string>
+    <string name="favorites">Избранное</string>
+    <string name="all_apps">Все приложения</string>
+    <string name="cast_page">Cast</string>
+    <string name="browser">Browser</string>
+    <string name="cast_enabled">Google Cast включён</string>
+    <string name="cast_unavailable">Google Cast недоступен</string>
+    <string name="cast_help">Начните трансляцию в Chrome на Mac или в приложении с кнопкой Cast.</string>
+    <string name="cast_settings">Настройки Google Cast</string>
     <string name="search_apps">Поиск приложений</string>
     <string name="no_favorites">Добавьте любимые приложения со страницы «Приложения».</string>
     <string name="no_search_results">Ничего не найдено.</string>
     <string name="add_favorite">Добавить %1$s на главную</string>
     <string name="remove_favorite">Убрать %1$s с главной</string>
     <string name="close">Закрыть</string>
+    <string name="mac_keyboard">Клавиатура Mac</string>
+    <string name="edit_favorites">Настроить избранное</string>
 </resources>

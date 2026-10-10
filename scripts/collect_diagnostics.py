@@ -49,7 +49,11 @@ BASELINE = [
 ]
 AUDIO = [(name, command) for name, command in BASELINE if name in {
     "identity", "audio_flinger", "audio_policy", "audio_service", "power", "cpu_load", "memory", "errors"
-}]
+}] + [
+    ("audio_foreground", "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity'"),
+    # Fixed audio keys only: unrelated settings and account values stay outside the snapshot.
+    ("audio_vendor_settings", "for key in sound_style sound_bass sound_treble sound_balance sound_surround sound_sound_surround sound_equalizer sound_equalizer_detail_120hz sound_equalizer_detail_500hz sound_equalizer_detail_1500hz sound_equalizer_detail_5000hz sound_equalizer_detail_10000hz sound_auto_volume_control sound_auto_volume_leveling sound_advanced_sound_mode sound_advanced_dialogue_enhancer sound_advanced_surround_virtualizer sound_advanced_volume_leveler; do echo \"$key=$(settings get global $key)\"; done"),
+]
 VIDEO = [(name, command) for name, command in BASELINE if name in {
     "identity", "cpu_load", "load_interval", "memory", "thermal", "media", "network", "errors"
 }]
@@ -76,6 +80,15 @@ CAST = [
     ("wifi_status", "cmd wifi status"),
     ("media", "dumpsys media.metrics | tail -n 120"),
     ("cast_events", "logcat -d -b main -b system -t 300 -v threadtime 'CastReceiverService:W' 'CastMirroring:W' 'chromium:W' '*:S'"),
+]
+MAINTENANCE = [
+    ("memory", "cat /proc/meminfo"),
+    ("data_storage", "df -k /data"),
+    # Separate commands preserve failures; a failed list must not imply missing packages.
+    ("packages_installed", "pm list packages --user 0"),
+    ("packages_enabled", "pm list packages -e --user 0"),
+    ("packages_disabled", "pm list packages -d --user 0"),
+    ("home_version", "dumpsys package com.metzrevive.home"),
 ]
 
 
@@ -130,7 +143,7 @@ def capture(arguments, timeout=20):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", required=True, help="Explicit ADB target; never stored in public configuration")
-    parser.add_argument("--profile", choices=("baseline", "audio", "video", "remote", "cast"), default="baseline")
+    parser.add_argument("--profile", choices=("baseline", "audio", "video", "remote", "cast", "maintenance"), default="baseline")
     parser.add_argument("--label", required=True, help="Local snapshot name, e.g. normal or distorted-audio")
     args = parser.parse_args()
     if not args.label or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for c in args.label):
@@ -147,8 +160,10 @@ def main():
     destination = folder / (args.label + ".json")
     if destination.exists():
         parser.error("snapshot already exists; choose a distinct condition label to preserve evidence")
-    commands = {"baseline": BASELINE, "audio": AUDIO, "video": VIDEO, "remote": REMOTE, "cast": CAST}[args.profile]
-    snapshot = {"profile": args.profile, "label": args.label, "started_utc": datetime.now(timezone.utc).isoformat(), "results": {}}
+    commands = {"baseline": BASELINE, "audio": AUDIO, "video": VIDEO, "remote": REMOTE, "cast": CAST,
+                "maintenance": MAINTENANCE}[args.profile]
+    snapshot = {"profile": args.profile, "label": args.label, "started_utc": datetime.now(timezone.utc).isoformat(),
+                "expected_commands": len(commands), "collection_complete": False, "results": {}}
     with destination.open("x", encoding="utf-8") as output:
         os.chmod(destination, 0o600)
         for name, command in commands:
@@ -160,6 +175,12 @@ def main():
             output.write("\n")
             output.truncate()
             output.flush()
+        snapshot["collection_complete"] = True
+        output.seek(0)
+        json.dump(snapshot, output, ensure_ascii=False, indent=2)
+        output.write("\n")
+        output.truncate()
+        output.flush()
     print(f"Saved private snapshot: local/diagnostics/{destination.name}")
 
 
