@@ -4,6 +4,28 @@ import ScreenCaptureKit
 @main
 struct CoreCheck {
     static func main() throws {
+        var cadence = FrameCadence()
+        cadence.record(0, expectedFPS: 60)
+        cadence.record(1.0 / 60, expectedFPS: 60)
+        cadence.record(0, expectedFPS: 60) // Out-of-order timestamps must not shift the origin.
+        cadence.record(2.0 / 60, expectedFPS: 60)
+        precondition(abs(cadence.maximumMS! - 1000.0 / 60) < 0.001 && cadence.longGaps == 0)
+        cadence.record(0.1, expectedFPS: 60)
+        precondition(cadence.longGaps == 1 && cadence.p95MS! > 60)
+        precondition(SessionAudioTime.relative(2_020_000, origin: CMTime(value: 2, timescale: 1)) == 20_000)
+        precondition(SessionAudioTime.relative(1_000_000, origin: CMTime(value: 2, timescale: 1)) == nil)
+        precondition(SessionAudioTime.relative(0, origin: .invalid) == nil)
+        var writes = WriteDeadlineGate()
+        let oldWrite = writes.begin()!
+        precondition(writes.begin() == nil && writes.expired(oldWrite))
+        writes.complete(oldWrite)
+        let currentWrite = writes.begin()!
+        // The old two-second deadline must not fail a newer audio packet.
+        precondition(!writes.expired(oldWrite) && writes.expired(currentWrite))
+        writes.complete(oldWrite)
+        precondition(writes.expired(currentWrite))
+        writes.complete(currentWrite)
+        precondition(!writes.expired(currentWrite))
         precondition(DisplayModeChoice.matches(width: 960, height: 540, rate: 60, requested: StreamMode(width: 960, height: 540, fps: 60)))
         precondition(!DisplayModeChoice.matches(width: 1280, height: 720, rate: 60, requested: StreamMode(width: 960, height: 540, fps: 60)))
         precondition(!DisplayModeChoice.matches(width: 960, height: 540, rate: 30, requested: StreamMode(width: 960, height: 540, fps: 60)))
@@ -16,6 +38,9 @@ struct CoreCheck {
         precondition(report.rates(since: next) == nil)
         do { _ = try TVFrameReport.parse(Data(count: 23)); preconditionFailure() } catch {}
         let native60 = StreamMode(width: 1366, height: 768, fps: 60)
+        let native50 = StreamMode(width: 1366, height: 768, fps: 50)
+        precondition(native50.valid && native50.level == "4.1")
+        precondition(StreamMode(width: 1280, height: 720, fps: 50).level == "4.1")
         precondition(native60.valid && native60.level == "4.2")
         precondition(StreamMode(width: 960, height: 540, fps: 60).level == "4.1")
         precondition(!StreamMode(width: 1920, height: 1080, fps: 60).valid)

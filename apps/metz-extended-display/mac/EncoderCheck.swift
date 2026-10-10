@@ -59,6 +59,6 @@ struct EncoderCheck {
             pipeline.stop()
             print("Hardware generated frames passed: " + mode.id)
         }
-        print("16 generated frames; no captured content, display/private API, network, UI or speed benchmark.")
+        print("\(StreamMode.candidates.count * 2) generated frames; no captured content, display/private API, network, UI or speed benchmark.")
     }
 }

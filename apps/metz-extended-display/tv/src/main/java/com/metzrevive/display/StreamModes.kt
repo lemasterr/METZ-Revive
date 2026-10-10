@@ -9,12 +9,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 data class StreamMode(val width: Int, val height: Int, val fps: Int) {
-    val level get() = if (width == 1366 && fps == 60) "4.2" else if (width == 1366 || (fps == 60 && width >= 960)) "4.1" else "3.1"
+    val level get() = if (width == 1366 && fps == 60) "4.2" else if (width == 1366 || (fps >= 50 && width >= 960)) "4.1" else "3.1"
     companion object {
         // Physical panel of this project's METZ 32MTC6000Z is 1366x768;
         // Android's 1280x720 framebuffer is a separate compositor mode.
         val candidates = listOf(854 to 480, 960 to 540, 1280 to 720, 1366 to 768).flatMap { (w, h) ->
-            listOf(30, 60).map { StreamMode(w, h, it) }
+            listOf(30, 50, 60).map { StreamMode(w, h, it) }
         }
     }
 }

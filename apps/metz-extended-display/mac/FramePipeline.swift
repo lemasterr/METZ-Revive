@@ -11,6 +11,14 @@ enum EncoderOutputDisposition {
     }
 }
 
+enum SessionAudioTime {
+    static func relative(_ captureUS: UInt64, origin: CMTime) -> UInt64? {
+        let start = CMTimeConvertScale(origin, timescale: 1_000_000, method: .roundTowardZero)
+        guard start.isNumeric, start.value >= 0, captureUS >= UInt64(start.value) else { return nil }
+        return captureUS - UInt64(start.value)
+    }
+}
+
 final class FramePipeline: @unchecked Sendable {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "metz.stream.encoder", qos: .userInteractive)
@@ -23,6 +31,9 @@ final class FramePipeline: @unchecked Sendable {
     private var forceIDR = true
     private var encoded = 0
     private var captured = 0
+    private var audioSubmitted = 0
+    private var captureCadence = FrameCadence()
+    private var admissionCadence = FrameCadence()
     private var dropped = 0
     private let epoch = UInt32.random(in: 1...UInt32.max)
     let transport: FramePacketTransport
@@ -31,6 +42,8 @@ final class FramePipeline: @unchecked Sendable {
     var failure: ((String) -> Void)?
     var counts: (Int, Int) { lock.lock(); defer { lock.unlock() }; return (encoded, dropped) }
     var capturedCount: Int { lock.lock(); defer { lock.unlock() }; return captured }
+    var audioPacketCount: Int { lock.lock(); defer { lock.unlock() }; return audioSubmitted }
+    var timing: (FrameCadence, FrameCadence) { lock.lock(); defer { lock.unlock() }; return (captureCadence, admissionCadence) }
 
     init(transport: FramePacketTransport, mode: StreamMode = .conservative, audio: Bool = false) throws {
         guard mode.valid else { throw StreamError.invalid }
@@ -38,7 +51,8 @@ final class FramePipeline: @unchecked Sendable {
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(mode.width), height: Int32(mode.height),
             codecType: kCMVideoCodecType_H264,
-            encoderSpecification: [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary,
+            encoderSpecification: [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true,
+                kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true] as CFDictionary,
             imageBufferAttributes: nil, compressedDataAllocator: nil,
             outputCallback: { refcon, _, status, flags, sample in
                 guard let refcon else { return }
@@ -59,9 +73,16 @@ final class FramePipeline: @unchecked Sendable {
             for (key, value) in properties {
                 guard VTSessionSetProperty(session, key: key, value: value) == noErr else { throw StreamError.unavailable }
             }
+            // Apple's low-latency hardware encoder may reject this optional property.
+            // RealTime, disabled reordering and low-latency rate control remain required.
+            _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 1))
             var hardware: Unmanaged<CFTypeRef>?
-            guard VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
-                allocator: nil, valueOut: &hardware) == noErr, (hardware?.takeRetainedValue() as? Bool) == true,
+            let hardwareStatus = VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                allocator: nil, valueOut: &hardware)
+            let hardwareValue = hardware?.takeRetainedValue() as? Bool
+            // The low-latency encoder returns PropertyNotSupported for this query.
+            // RequireHardware at creation already prohibits software fallback; a reported false still fails.
+            guard (hardwareStatus == noErr && hardwareValue == true) || hardwareStatus == kVTPropertyNotSupportedErr,
                 VTCompressionSessionPrepareToEncodeFrames(session) == noErr else { throw StreamError.unavailable }
         } catch { VTCompressionSessionInvalidate(session); self.session = nil; throw error }
     }
@@ -72,6 +93,7 @@ final class FramePipeline: @unchecked Sendable {
         lock.lock()
         guard !stopped else { lock.unlock(); return }
         captured += 1
+        captureCadence.record(pts.seconds, expectedFPS: mode.fps)
         if pending != nil { dropped += 1 }
         pending = (buffer, pts)
         let start = !busy
@@ -91,8 +113,11 @@ final class FramePipeline: @unchecked Sendable {
         pending = nil
         lock.unlock()
         guard let session else { failed("Кодировщик недоступен."); return }
+        lock.lock()
         if basePTS == nil { basePTS = frame.1 }
-        let pts = CMTimeSubtract(frame.1, basePTS!)
+        let origin = basePTS!
+        lock.unlock()
+        let pts = CMTimeSubtract(frame.1, origin)
         if pts < .zero || (lastPTS.isValid && pts <= lastPTS) { finishFrame(); return }
         lastPTS = pts
         let properties: CFDictionary? = forceIDR ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
@@ -158,15 +183,22 @@ final class FramePipeline: @unchecked Sendable {
                 payload: Wire.annexB(avcc, nalLength: Int(nalLength))))
             transport.send(packets, pts: UInt64(us)) { [weak self] success in
                 guard let self else { return }
-                if success { self.lock.lock(); self.encoded += 1; self.lock.unlock(); self.finishFrame() }
+                if success {
+                    self.lock.lock(); self.encoded += 1
+                    self.admissionCadence.record(ProcessInfo.processInfo.systemUptime, expectedFPS: self.mode.fps)
+                    self.lock.unlock(); self.finishFrame()
+                }
                 else { self.failed("Не удалось передать кадр на ТВ.") }
             }
         } catch { failed("Некорректный кадр H.264.") }
     }
 
     func submitAudio(_ pcm: Data, pts: UInt64) {
-        lock.lock(); let ready = !stopped && encoded > 0; lock.unlock()
-        guard audio, ready, let packet = try? Wire.packet(type: 4, epoch: epoch, pts: pts, payload: pcm) else { return }
+        lock.lock(); let ready = !stopped && encoded > 0, origin = basePTS; lock.unlock()
+        guard audio, ready, let origin,
+            let relative = SessionAudioTime.relative(pts, origin: origin),
+            let packet = try? Wire.packet(type: 4, epoch: epoch, pts: relative, payload: pcm) else { return }
+        lock.lock(); audioSubmitted += 1; lock.unlock()
         transport.sendAudio(packet)
     }
     private func finishFrame() {

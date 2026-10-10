@@ -1,5 +1,7 @@
 # METZ Revive — дорожная карта
 
+10 октября2026: **Manager0.9.2/build16 / TVDisplay0.7.1/code18 установлены**. Исправлены устаревшие audio deadline, завершение при закрытии окна и компактные страницы; добавлены 50 FPS во всех четырёх разрешениях. Звук/start-stop-restart/выход проверены; стабильные 60 FPS и синхронизация исходного Mac-аудио не доказаны. Сравнение 50/60 и дизайн — вручную. [Результат и возврат](docs/AUDIO_CADENCE_FIX.md).
+
 Последнее обновление 10 октября2026: Manager0.9.1/build15 / TVDisplay0.7.0/code16 установлены; повторный экран проверен, передача56–58FPS при target60. ADB/power GUI и повторный запуск прошли. Таймер экрана1час; Mrowser1.3.0 установлен, No BS/TV Bro удалены с сохранением данных. Итоговый дизайн и Mrowser пользователь проверяет сам. Этап13 активен. [Полный результат](docs/MANAGER_UI_STREAM_CHECK.md).
 
 10 октября: [Manager0.8.1 / TV Display0.6.1](docs/DISPLAY_RELIABILITY_FIX.md) установлены. Обновления SPS/PPS, Quartz mode/ID, собственный foreground ADB и Local Network диагностика реализованы. Core/fake/helper fixture/doubles/JVM/build/lint/16 synthetic hardware frames/codesign/readback прошли. Реальный owned-ADB metadata check без окружения Terminal прошёл, helper завершён. Этап13 активен до ручных результатов GUI reconnect, курсора/окна, смены разрешения/60FPS/audio/ресурсов; затем оставшаяся приёмка standby.

@@ -73,9 +73,11 @@ void *METZCreateDisplay(METZDisplayFailure *failure) {
 void *METZCreateDisplayWithMode(unsigned int width, unsigned int height, unsigned int fps, METZDisplayFailure *failure) {
     *failure = METZDisplayFailureModeRejected;
     if (!((width == 854 && height == 480) || (width == 960 && height == 540) ||
-        (width == 1280 && height == 720) || (width == 1366 && height == 768)) || (fps != 30 && fps != 60)) return NULL;
+        (width == 1280 && height == 720) || (width == 1366 && height == 768)) || (fps != 30 && fps != 50 && fps != 60)) return NULL;
     NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
     unsigned int base = [bundle isEqualToString:@"com.metzrevive.manager"] ? 0x10000000 : 0x20000000;
+    // Preserve existing 30/60 identities; reserve a separate bit for the 50 Hz mode.
+    if (fps == 50) base |= 0x04000000;
     unsigned int serial = base | (width << 12) | (height << 1) | (fps == 60 ? 1 : 0);
     return CreateDisplay(NSClassFromString(@"CGVirtualDisplayDescriptor"), NSClassFromString(@"CGVirtualDisplay"),
         NSClassFromString(@"CGVirtualDisplaySettings"), NSClassFromString(@"CGVirtualDisplayMode"), serial, width, height, fps, failure);

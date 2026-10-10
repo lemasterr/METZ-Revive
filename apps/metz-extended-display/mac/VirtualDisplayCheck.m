@@ -102,6 +102,11 @@ int main(void) {
             expectedWidth, expectedHeight, expectedFPS, &modeFailure);
         assert(native && modeFailure == METZDisplayFailureNone);
         METZReleaseDisplay(native); assert(liveDisplays == 0);
+        expectedFPS = 50;
+        native = METZCreateDisplayWithModeForTesting(ModernDescriptor.class, TestDisplay.class, TestSettings.class, TestMode.class,
+            expectedWidth, expectedHeight, expectedFPS, &modeFailure);
+        assert(native && modeFailure == METZDisplayFailureNone);
+        METZReleaseDisplay(native); assert(liveDisplays == 0);
         expectedWidth = 1280; expectedHeight = 720; expectedFPS = 30;
         CheckFailure(Nil, TestDisplay.class, TestSettings.class, TestMode.class, METZDisplayFailureClasses);
         CheckFailure(ModernDescriptor.class, NSObject.class, TestSettings.class, TestMode.class, METZDisplayFailureDisplayInterface);

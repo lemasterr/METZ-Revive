@@ -44,7 +44,7 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
     private var sendSequence: UInt64 = 0
     private var heartbeat: DispatchSourceTimer?
     private var heartbeatPending = false
-    private var audioPending = false
+    private var audioWrites = WriteDeadlineGate()
     private var trustFailure: String?
     private var waitingError: NWError?
     var decoded: (() -> Void)?
@@ -84,7 +84,7 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
         queue.async {
             self.connection?.cancel()
             self.completeSend(false)
-            self.generation = UUID(); self.connection = connection; self.sending = false; self.protocolReady = false; self.audioPending = false
+            self.generation = UUID(); self.connection = connection; self.sending = false; self.protocolReady = false; self.audioWrites = WriteDeadlineGate()
             self.trustFailure = nil; self.waitingError = nil
             let token = self.generation
             connection.stateUpdateHandler = { [weak self] state in
@@ -134,17 +134,17 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
     // Drop raw sound samples under congestion rather than growing latency or memory.
     func sendAudio(_ data: Data) {
         queue.async {
-            guard data.count <= 8216, self.protocolReady, !self.audioPending,
-                let connection = self.connection, connection.state == .ready else { return }
-            self.audioPending = true
+            guard data.count <= 8216, self.protocolReady,
+                let connection = self.connection, connection.state == .ready,
+                let write = self.audioWrites.begin() else { return }
             let token = self.generation
             connection.send(content: data, completion: .contentProcessed { error in
                 guard self.generation == token else { return }
-                self.audioPending = false
+                self.audioWrites.complete(write)
                 if error != nil { self.fail() }
             })
             self.queue.asyncAfter(deadline: .now() + 2) {
-                if self.generation == token && self.audioPending { self.fail("Передача звука остановилась. Повторите подключение без звука.") }
+                if self.generation == token && self.audioWrites.expired(write) { self.fail("Передача звука остановилась. Повторите подключение без звука.") }
             }
         }
     }
@@ -229,7 +229,7 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
     }
     private func fail(_ reason: String = "Поток прерван. Повторите подключение вручную.") {
         heartbeat?.cancel(); heartbeat = nil
-        connection?.cancel(); connection = nil; generation = UUID(); protocolReady = false; audioPending = false
+        connection?.cancel(); connection = nil; generation = UUID(); protocolReady = false; audioWrites = WriteDeadlineGate()
         failure?(reason)
         completeSend(false)
     }

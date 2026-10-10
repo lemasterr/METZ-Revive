@@ -52,6 +52,7 @@ struct ManagerView: View {
         .buttonStyle(MetzButtonStyle())
         .onAppear {
             ManagerAppDelegate.displayManager = displayManager
+            ManagerAppDelegate.model = model
             if CommandLine.arguments.contains("--check") { page = .display }
         }
         .onChange(of: model.selectedSerial) { _, value in
@@ -66,7 +67,7 @@ struct ManagerView: View {
         }
         .onChange(of: model.fastRemote) { _, _ in model.disconnectRemote() }
         .onChange(of: page) { _, _ in if page != .control { model.disconnectRemote() } }
-        .onDisappear { model.disconnectRemote(); Task { await displayManager.stop() } }
+        .onDisappear { model.disconnectRemote() }
         .sheet(isPresented: $connectionDetails) { connectionSheet }
         .confirmationDialog("Включить клавиатуру Mac на выбранном ТВ?", isPresented: $confirmKeyboard) {
             Button("Включить клавиатуру Mac") { model.switchKeyboard(restore: false) }
@@ -182,10 +183,10 @@ struct ManagerView: View {
                         Spacer(minLength: 0)
                         VStack(spacing: 8) {
                             remoteKey("Пауза", "playpause", .playPause)
-                            Button { inputMode = true } label: { Label("Ввод с Mac", systemImage: "keyboard").frame(maxWidth: .infinity) }
-                            Button { page = .applications } label: { Label("Приложения", systemImage: "square.grid.2x2").frame(maxWidth: .infinity) }
-                            Button { page = .display } label: { Label("Экран", systemImage: "display").frame(maxWidth: .infinity) }
-                        }.frame(width: 180)
+                            Button { inputMode = true } label: { Image(systemName: "keyboard").frame(width: 20, height: 20) }.help("Ввод с Mac").accessibilityLabel("Ввод с Mac")
+                            Button { page = .applications } label: { Image(systemName: "square.grid.2x2").frame(width: 20, height: 20) }.help("Приложения").accessibilityLabel("Приложения")
+                            Button { page = .display } label: { Image(systemName: "display").frame(width: 20, height: 20) }.help("Экран").accessibilityLabel("Экран")
+                        }.frame(width: 48)
                     }.padding(.vertical, 12)
                     Toggle("Управление стрелками клавиатуры", isOn: $keyboardMode).disabled(!canControl)
                     if keyboardMode && canControl { RemoteKeyCapture { model.control($0) }.frame(width: 1, height: 1) }
@@ -201,9 +202,9 @@ struct ManagerView: View {
             }.padding(MetzStyle.pagePadding).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
-    private func remoteKey(_ title: String, _ symbol: String, _ action: TVAction, iconOnly: Bool = false) -> some View {
+    private func remoteKey(_ title: String, _ symbol: String, _ action: TVAction, iconOnly: Bool = true) -> some View {
         Button { model.control(action) } label: {
-            if iconOnly { Image(systemName: symbol).font(.title3).frame(width: 24) }
+            if iconOnly { Image(systemName: symbol).font(.system(size: 18)).frame(width: 20, height: 20) }
             else { Label(title, systemImage: symbol).frame(maxWidth: .infinity) }
         }.disabled(!canControl).help(title).accessibilityLabel(title)
     }
@@ -290,7 +291,7 @@ private struct DirectionPad: View {
                         }.contentShape(DirectionSector(angle: angle))
                 }.buttonStyle(.plain).help(title).accessibilityLabel(title)
             }
-            Button("OK") { send(.select) }.font(.system(size: 20, weight: .semibold))
+            Button { send(.select) } label: { Image(systemName: "checkmark").font(.system(size: 20, weight: .semibold)) }
                 .frame(width: 64, height: 64).background(MetzStyle.accent.opacity(0.15), in: Circle())
                 .overlay(Circle().stroke(MetzStyle.accent, lineWidth: 2)).contentShape(Circle()).buttonStyle(.plain)
                 .accessibilityLabel("Подтвердить")
