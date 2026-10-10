@@ -1,0 +1,82 @@
+package com.metzrevive.display
+
+import java.nio.ByteBuffer
+
+fun main() {
+    val telemetry = FrameTelemetry(0)
+    telemetry.output(); telemetry.output()
+    telemetry.rendered(0, 10); telemetry.rendered(0, 11); telemetry.rendered(1, 12)
+    val metrics = java.nio.ByteBuffer.wrap(telemetry.report(1_000_000_000))
+    check(metrics.get().toInt() == 0x54 && metrics.long == 2L && metrics.long == 2L && metrics.long == 1_000_000L)
+    val session = VideoSessionGate()
+    val motion = VideoSessionParameters(1366, 768, 60, 7, false)
+    check(session.accept(motion))
+    // Changing SPS/PPS on a keyframe keeps the same session rather than allocating a second decoder.
+    check(session.accept(motion.copy()))
+    check(!session.accept(motion.copy(width = 1280, height = 720)))
+    check(!session.accept(motion.copy(epoch = 8)) && !session.accept(motion.copy(audio = true)))
+    check(session.accept(motion))
+    check(!VideoSessionGate().accept(motion.copy(epoch = 0)))
+
+    check(StreamProtocol.admissionReceipt(1234).contentEquals(byteArrayOf(0x46, 0, 0, 0, 0, 0, 0, 4, 0xD2.toByte())))
+    check(runCatching { StreamProtocol.admissionReceipt(-1) }.isFailure)
+    val launch = TrustedLaunchGate()
+    val saved = "a".repeat(64)
+    check(!launch.consume(saved, 100)) // An exported activity intent cannot arm trust.
+    check(!launch.arm("", saved, 100) && !launch.arm(saved, "b".repeat(64), 100))
+    check(launch.arm(saved, saved.uppercase(), 100) && launch.consume(saved, 200))
+    check(!launch.consume(saved, 201)) // A request is usable only once.
+    check(launch.arm(saved, saved, 100) && !launch.consume(saved, 10_101))
+    check(launch.arm(saved, saved, 100) && !launch.consume(saved, 99))
+    check(launch.arm(saved, saved, 100) && !launch.consume("b".repeat(64), 200))
+    check(!launch.consume(saved, 201))
+    val inbox = FrameInbox()
+    val first = EncodedFrame(byteArrayOf(0x65), 1)
+    val second = EncodedFrame(byteArrayOf(0x41), 2)
+    val third = EncodedFrame(byteArrayOf(0x41), 3)
+    check(inbox.offer(first) && inbox.offer(second))
+    val waiting = java.util.concurrent.CountDownLatch(1)
+    val finished = java.util.concurrent.CountDownLatch(1)
+    val accepted = java.util.concurrent.atomic.AtomicBoolean(false)
+    val sender = Thread {
+        waiting.countDown()
+        accepted.set(inbox.offer(third))
+        finished.countDown()
+    }
+    sender.start()
+    check(waiting.await(1, java.util.concurrent.TimeUnit.SECONDS))
+    check(!finished.await(30, java.util.concurrent.TimeUnit.MILLISECONDS))
+    check(inbox.poll() === first)
+    check(finished.await(1, java.util.concurrent.TimeUnit.SECONDS) && accepted.get())
+    sender.join(1000)
+    check(inbox.poll() === second && inbox.poll() === third)
+    check(inbox.offer(first) && inbox.offer(second))
+    check(!inbox.offer(third, timeoutMillis = 20))
+    check(inbox.poll() === first && inbox.poll() === second)
+    inbox.offer(first); inbox.clear(); check(inbox.poll() == null)
+    check(TLSFailure.classify(java.security.cert.CertificateException("Peer fingerprint mismatch")) == "PIN_MISMATCH")
+    check(TLSFailure.classify(java.security.cert.CertificateExpiredException()) == "CERTIFICATE_TIME")
+    check(TLSFailure.classify(java.net.SocketTimeoutException()) == "TIMEOUT")
+    check(TLSFailure.classify(java.security.SignatureException()) == "TLS_SIGNATURE")
+    check(TLSFailure.classify(Exception("Unknown")) == "TLS_HANDSHAKE")
+
+    fun header(type: Int = 2, length: Int = 5, epoch: Int = 7, pts: Long = 10) = ByteBuffer.allocate(24)
+        .putInt(0x4d545a31).put(1.toByte()).put(type.toByte()).putShort(1.toShort())
+        .putInt(length).putInt(epoch).putLong(pts).array()
+    check(StreamProtocol.header(header()).epoch == 7L)
+    check(StreamMode(1366, 768, 60).level == "4.2")
+    check(StreamMode(960, 540, 60).level == "4.1")
+    check(StreamMode(1920, 1080, 60) !in StreamMode.candidates)
+    fun audioHeader(length: Int, flags: Int = 0) = ByteBuffer.allocate(24).putInt(0x4d545a31).put(1).put(4)
+        .putShort(flags.toShort()).putInt(length).putInt(7).putLong(10).array()
+    check(StreamProtocol.header(audioHeader(8192)).type == 4)
+    for (invalid in listOf(audioHeader(0), audioHeader(3), audioHeader(8196), audioHeader(4, 1))) check(runCatching { StreamProtocol.header(invalid) }.isFailure)
+    for (malformed in listOf(header(length = -1), header(length = 1_048_577), header(epoch = 0), header(pts = -1), header(type = 9), ByteArray(23))) {
+        check(runCatching { StreamProtocol.header(malformed) }.isFailure)
+    }
+    check(StreamProtocol.hasIDR(byteArrayOf(0, 0, 0, 1, 0x65)))
+    check(!StreamProtocol.hasIDR(byteArrayOf(0, 0, 0, 1, 0x41)))
+    check(StreamProtocol.validPin("a".repeat(64)))
+    check(!StreamProtocol.validPin("g".repeat(64)) && !StreamProtocol.validPin("a".repeat(63)))
+    println("Receiver protocol, bounded queue and trusted one-shot launch passed: unknown/changed/expired/replayed requests rejected; no device/UI/network.")
+}

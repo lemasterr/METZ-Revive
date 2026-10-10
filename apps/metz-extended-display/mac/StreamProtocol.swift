@@ -1,0 +1,99 @@
+import Foundation
+
+struct StreamMode: Hashable, Codable, Identifiable {
+    let width: Int
+    let height: Int
+    let fps: Int
+    var id: String { "\(width)x\(height)@\(fps)" }
+    var title: String { "\(width)×\(height) · \(fps) кадров/с" }
+    static let conservative = StreamMode(width: 1280, height: 720, fps: 30)
+    static let candidates = [(854, 480), (960, 540), (1280, 720), (1366, 768)].flatMap { w, h in
+        [30, 60].map { StreamMode(width: w, height: h, fps: $0) }
+    }
+    var valid: Bool { Self.candidates.contains(self) }
+    var level: String { width * height > 1280 * 720 && fps == 60 ? "4.2" : (width == 1366 || (fps == 60 && width >= 960) ? "4.1" : "3.1") }
+    static func parse(_ data: Data) -> [StreamMode] {
+        guard data.count <= 4096, let values = try? JSONDecoder().decode([StreamMode].self, from: data),
+            values.count <= candidates.count, values.allSatisfy(\.valid) else { return [] }
+        return Array(Set(values)).sorted { a, b in a.fps == b.fps ? a.width * a.height > b.width * b.height : a.fps > b.fps }
+    }
+}
+
+enum StreamError: Error { case invalid, unavailable, overloaded, expired }
+
+struct TVFrameReport: Equatable {
+    let output: UInt64
+    let rendered: UInt64
+    let elapsedUS: UInt64
+    static func parse(_ data: Data) throws -> Self {
+        guard data.count == 24 else { throw StreamError.invalid }
+        let values = stride(from: 0, to: 24, by: 8).map { offset in
+            data[offset..<(offset + 8)].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        }
+        guard values[2] > 0, values[1] <= values[0] else { throw StreamError.invalid }
+        return Self(output: values[0], rendered: values[1], elapsedUS: values[2])
+    }
+    func rates(since previous: Self) -> (Double, Double)? {
+        guard elapsedUS > previous.elapsedUS, output >= previous.output, rendered >= previous.rendered else { return nil }
+        let seconds = Double(elapsedUS - previous.elapsedUS) / 1_000_000
+        return (Double(output - previous.output) / seconds, Double(rendered - previous.rendered) / seconds)
+    }
+}
+
+/// Network acceptance and decoder admission may arrive in either order.
+struct FrameDeliveryGate {
+    let pts: UInt64
+    init(pts: UInt64 = 0) { self.pts = pts }
+    private(set) var written = false
+    private(set) var admitted = false
+    mutating func markWritten() { written = true }
+    mutating func acknowledge(pts: UInt64 = 0) -> Bool {
+        guard !admitted, self.pts == pts else { return false }
+        admitted = true
+        return true
+    }
+    var complete: Bool { written && admitted }
+}
+
+enum Wire {
+    static let maximumPayload = 1_048_576
+    static let headerSize = 24
+    static func receiptPTS(_ bytes: Data) throws -> UInt64 {
+        guard bytes.count == 8 else { throw StreamError.invalid }
+        return bytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+    }
+    // Big endian: magic(4), version(1), type(1), flags(2), length(4), epoch(4), ptsUs(8).
+    static func packet(type: UInt8, flags: UInt16 = 0, epoch: UInt32, pts: UInt64 = 0, payload: Data) throws -> Data {
+        guard [UInt8(1), 2, 3, 4].contains(type), payload.count <= maximumPayload,
+              type == 2 || payload.count <= 65_536,
+              type != 4 || (!payload.isEmpty && payload.count <= 8192 && payload.count % 4 == 0 && flags == 0) else { throw StreamError.invalid }
+        var data = Data([0x4d, 0x54, 0x5a, 0x31, 1, type])
+        append(flags, to: &data); append(UInt32(payload.count), to: &data)
+        append(epoch, to: &data); append(pts, to: &data)
+        data.append(payload)
+        return data
+    }
+    static func append<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
+        var big = value.bigEndian
+        withUnsafeBytes(of: &big) { data.append(contentsOf: $0) }
+    }
+    static func validPin(_ value: String) -> Bool {
+        value.count == 64 && value.allSatisfy { $0.isASCII && $0.isHexDigit }
+    }
+    static func annexB(_ data: Data, nalLength: Int) throws -> Data {
+        guard (1...4).contains(nalLength), data.count <= maximumPayload else { throw StreamError.invalid }
+        var offset = 0, result = Data()
+        while offset < data.count {
+            guard data.count - offset >= nalLength else { throw StreamError.invalid }
+            var size = 0
+            for byte in data[offset..<(offset + nalLength)] { size = (size << 8) | Int(byte) }
+            offset += nalLength
+            guard size > 0, size <= data.count - offset else { throw StreamError.invalid }
+            result.append(contentsOf: [0, 0, 0, 1]); result.append(data[offset..<(offset + size)])
+            guard result.count <= maximumPayload else { throw StreamError.invalid }
+            offset += size
+        }
+        guard !result.isEmpty else { throw StreamError.invalid }
+        return result
+    }
+}

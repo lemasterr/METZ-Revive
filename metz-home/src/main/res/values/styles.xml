@@ -1,9 +1,10 @@
 <resources>
-    <color name="background">#111418</color>
-    <color name="surface">#20262E</color>
-    <color name="text">#F3F5F7</color>
-    <color name="muted">#ABB4C0</color>
-    <color name="focus">#A9D7FF</color>
+    <color name="background">#0B1220</color>
+    <color name="surface">#111A2B</color>
+    <color name="text">#F5F7FA</color>
+    <color name="muted">#AEB8C7</color>
+    <color name="focus">#2F80FF</color>
+    <color name="focus_soft">#7DB5FF</color>
     <style name="HomeTheme" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowBackground">@color/background</item>

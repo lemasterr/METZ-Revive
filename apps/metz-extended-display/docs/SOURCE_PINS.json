@@ -1,0 +1,57 @@
+[
+  {
+    "repository": "Stengo/DeskPad",
+    "commit": "c3349f0e237e000cb4826fb3ea1cdd1c44949461",
+    "files": {
+      "BuildTools/Empty.swift": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "BuildTools/Package.swift": "19d64b180f68659aa6ca9f7b69c0f29d88ef32163da8fb0750334b38b9f89caf",
+      "DeskPad/AppDelegate.swift": "904759893ffd48d9b7ee4890117d32163af0914d18cdbba997606e26c5b83236",
+      "DeskPad/Backend/AppState.swift": "ed647c18ce023fad59516542185ccf61ddd32f0b535d7cda249925a2ce37de01",
+      "DeskPad/Backend/MouseLocation/MouseLocationSideEffect.swift": "387a07aacff04dbbf69b27060845325984eab27324108eb2f64a6c8936ea436f",
+      "DeskPad/Backend/MouseLocation/MouseLocationState.swift": "195126189772ddb91334176ab682a55c4adf4832fbace3858ac7f7358f5c19a8",
+      "DeskPad/Backend/ScreenConfiguration/ScreenConfigurationSideEffect.swift": "e552e78809775fc2c4a3773cc274d355e4fd342b69f4955432f08d1c2851cd15",
+      "DeskPad/Backend/ScreenConfiguration/ScreenConfigurationState.swift": "4b90264c2bc6d66c93d1f1cdcb2a18b99988b1bbbb13fce744af12c279a2a8f0",
+      "DeskPad/Backend/SideEffectsMiddleware.swift": "5b5688c29e47273ca40bc3c2b70413ba679fc53da4c19cb64a2b2afb9ec351e9",
+      "DeskPad/Backend/Store.swift": "45c837555acc36f59e87814f489d202c6efcfce4bb0800bf12da1f1ee314059d",
+      "DeskPad/CGVirtualDisplayPrivate.h": "8a6c75a2c458db57b2df7bc65844bcf519878c8e8b82fb0a52a90abbf70fc258",
+      "DeskPad/DeskPad-Bridging-Header.h": "3f9cf7398b4c80eb79fb2502d097c40a0d7ea66f454197b99ad69a3d57e0f718",
+      "DeskPad/Frontend/Screen/ScreenViewController.swift": "170de0d788e9952fdf0e7cbe2383076ac99b595f88c56663fd9af0ab0b337563",
+      "DeskPad/Frontend/Screen/ScreenViewData.swift": "4fc5850baa6c10603ad15c00f529ef8128df287bc01bcdd82958a23dc9cb9f29",
+      "DeskPad/Helpers/NSScreen+Extensions.swift": "e947658ca46d790353dcfdf74d3bc56907fdc794b6a359340a30ae9cf55cdb05",
+      "DeskPad/SubscriberViewController.swift": "8f9894808880ed42eb75a7de09a85807887eb9a3a0ba57b55e5b31d1dfd07a88",
+      "DeskPad/main.swift": "5431820e30d072485a527a4b6371ba8176500b33b4e69deae194fcd4b2605b5f",
+      "LICENSE.md": "65817005ed84270e73fe24bb0aff422dceeabd12418aa96e81c6749a62dced13",
+      "README.md": "cdb26313a4e38bb42fa2c98af476c9512a45f11e9463ff5b701f91d00b77c595"
+    }
+  },
+  {
+    "repository": "xocialize/VirtualDisplayKit",
+    "commit": "32227f2ccdbc982f8568dcee33ead2878a9698a6",
+    "files": {
+      "ATTRIBUTION.md": "e6045548c6800c131d97c031a5e7b1e2450a8ca6debc997d71c7c4c35a277d04",
+      "Examples/AppKitExampleApp.swift": "3b44c4aec8965c1ea89397d009a545ab8d9c1e5c6c0d1f3966959252784c849c",
+      "Examples/DigitalSignageExample.swift": "ce2d58532230af107933b705aff59a831332de6e93671a903fcdd2c4c1482892",
+      "Examples/SignageTestApp/SignageTestApp.swift": "3c9035e29974773a09ebdd7cf2f7c010319d079e64e8b9a2ebc3990c29551139",
+      "Examples/SwiftUIExampleApp.swift": "fad9e9a42decccc294753d110c6fef9ccef1cdba4e543a37ca93921e964ee621",
+      "LICENSE": "c3960ac034b9ed1ae018d1530fbc6ca40e88c4b904e87b43cdaf6fedf7398548",
+      "Package.swift": "d6c4b8bf77b265cd898750056a2bb2117063f6ef71fadf46c4c4dbb00f80d634",
+      "README.md": "169651987861a80d135df2c7e8d5a543704bdcb766ab751a6f13f0c17ff52318",
+      "SECURITY.md": "18ca9291f73f15e7222c3fadc19bb6ac2ff9200dad3f4ec313b59d133a26cddb",
+      "Sources/CVirtualDisplayPrivate/include/CGVirtualDisplayPrivate.h": "23ffff79cde35b7f36c8c070908868d650bbaf71259a50924609b1fdf2ee390c",
+      "Sources/VirtualDisplayKit/Core/DisplayRecorder.swift": "0f863af553e427c21ca504e16d81432f7f615b9804802d69193324023b053c7f",
+      "Sources/VirtualDisplayKit/Core/DisplayStreamRenderer.swift": "88d54bae3fc737e9f062cd37034782a2d6e2bd637386dd287530beaac0f10968",
+      "Sources/VirtualDisplayKit/Core/FrameOutputStream.swift": "48a726bc71fe09ccb08f1b1913ea1d33f006372fc7d6567cef713e13bb92b730",
+      "Sources/VirtualDisplayKit/Core/MouseTracker.swift": "d004f04dd67e1aa9fffdca2ef406a38b8271a7b6ba0fc720d244b30d8bbfe20d",
+      "Sources/VirtualDisplayKit/Core/VirtualDisplay.swift": "d6d647d4aac0759a249f78732dbe061ac0eaea3bc4f5745b335e1f9c231f42ca",
+      "Sources/VirtualDisplayKit/Core/VirtualDisplayConfiguration.swift": "d4bb40c3276bf63eb34684217fbd49b053fb9eaff9f289da6b6fd7cf76a1bf79",
+      "Sources/VirtualDisplayKit/Extensions/NSScreen+Extensions.swift": "fce4ea1087334821e0fae9fd945b831250c50812f71b2a62243fbd51d514cf7d",
+      "Sources/VirtualDisplayKit/Views/VirtualDisplayNSView.swift": "0640d03180a37015ac9645821527ba33b075cc8b79ac225e0018eaddceea9849",
+      "Sources/VirtualDisplayKit/Views/VirtualDisplayView.swift": "787721a67e26514208a14b98ab60199dd6df2f35316f1c55d0e2818387851519",
+      "Sources/VirtualDisplayKit/VirtualDisplayController.swift": "78cb27785c29d6cfe00191e38d54533fbe83dd30562059d196a3d1eec44099e7",
+      "Sources/VirtualDisplayKit/VirtualDisplayKit.swift": "763861c2541aaff881be6e27f685c271765634d132474889d5ce3ccb753d10be",
+      "Tests/VirtualDisplayKitTests/VirtualDisplayKitTests.swift": "8dc770c3659d6c9b8ac0124f2302441a00a30b9bfbe0d9a55b9e1e81e8b73b81",
+      "VirtualDisplayDemo/ContentView.swift": "24a9102198c081bf801af1e578acf17c29f56e4cc1a0bae301343fdecfc59e14",
+      "VirtualDisplayDemo/VirtualDisplayDemoApp.swift": "65d9089b294bd25181a885cd3bcc20f5d54da4caba6103d49fa83b972a1fb5d6"
+    }
+  }
+]

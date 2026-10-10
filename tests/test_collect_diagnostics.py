@@ -81,9 +81,26 @@ class CollectionGuards(unittest.TestCase):
             destination = Path(folder) / "local" / "diagnostics" / "sample.json"
             snapshot = json.loads(destination.read_text(encoding="utf-8"))
             self.assertEqual(len(snapshot["results"]), len(collector.AUDIO))
+            self.assertTrue(snapshot["collection_complete"])
+            self.assertEqual(snapshot["expected_commands"], len(collector.AUDIO))
             self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
             for call in mocked.call_args_list[1:]:
                 self.assertEqual(call.args[0][:4], ["adb", "-s", "test-device", "shell"])
+
+    def test_interrupted_collection_keeps_incomplete_marker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = {"returncode": 0, "stdout": "device", "timed_out": False, "truncated": False}
+            with patch.object(collector, "ROOT", Path(folder)), \
+                 patch.object(collector.shutil, "which", return_value="adb"), \
+                 patch.object(sys, "argv", [str(SCRIPT), "--serial", "test-device", "--profile", "audio", "--label", "partial"]), \
+                 patch.object(collector, "capture", side_effect=[state, state, InterruptedError()]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(InterruptedError):
+                    collector.main()
+            snapshot = json.loads((Path(folder) / "local/diagnostics/partial.json").read_text())
+            self.assertFalse(snapshot["collection_complete"])
+            self.assertEqual(len(snapshot["results"]), 1)
+            self.assertEqual(snapshot["expected_commands"], len(collector.AUDIO))
 
     def test_label_cannot_escape_private_directory(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -128,6 +145,28 @@ class CollectionGuards(unittest.TestCase):
             snapshot = json.loads((Path(folder) / "local/diagnostics/sample.json").read_text())
             self.assertEqual(snapshot["profile"], "cast")
             self.assertIn("cast_services", snapshot["results"])
+
+    def test_maintenance_snapshot_is_small_and_read_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old_umask = collector.os.umask(0o077)
+            try:
+                mocked = self.run_main(folder, {
+                    "returncode": 0, "stdout": "device", "timed_out": False, "truncated": False,
+                }, profile="maintenance")
+            finally:
+                collector.os.umask(old_umask)
+            commands = [call.args[0][4] for call in mocked.call_args_list[1:]]
+            self.assertEqual(len(commands), 6)
+            self.assertEqual(commands, [
+                "cat /proc/meminfo", "df -k /data", "pm list packages --user 0",
+                "pm list packages -e --user 0", "pm list packages -d --user 0",
+                "dumpsys package com.metzrevive.home",
+            ])
+            for call in mocked.call_args_list[1:]:
+                self.assertEqual(call.args[0][:4], ["adb", "-s", "test-device", "shell"])
+            snapshot = json.loads((Path(folder) / "local/diagnostics/sample.json").read_text())
+            self.assertTrue(snapshot["collection_complete"])
+            self.assertEqual(snapshot["profile"], "maintenance")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,81 @@
+# METZ Extended Display
+
+Актуальная установленная пара: **Manager0.9.1/build15 / TVDisplay0.7.0/code16**. Компактный интерфейс, полный ADB power ответ до1МиБ, последовательное завершение сеанса. Два реальных старта/остановки прошли; итоговый поток около56–58FPS при target60, Surface FPS не измерен. [Проверки, ограничения и возврат](../../docs/MANAGER_UI_STREAM_CHECK.md). Визуальная приёмка и браузер Mrowser — вручную.
+
+## Предыдущие результаты
+
+Текущая установленная пара: **Manager0.8.1/build13 / TV Display0.6.1/code14**. Приёмник принимает обновлённые SPS/PPS в прежнем сеансе; общий движок Manager явно применяет Quartz mode и ждёт регистрации экрана. Собственный ADB helper работает без общего daemon Terminal. Core/build и реальный metadata check прошли; UI/capture/курсор/смена разрешения/60FPS/звук ещё не проверены. [Результат и возврат](../../docs/DISPLAY_RELIABILITY_FIX.md).
+
+История0.8/0.6: [подтверждение, режимы и звук](../../docs/DISPLAY_CONTROLS_AUDIO.md). История0.7/0.5: [однократное доверие, запуск по кнопке с Mac и admission ACK](../../docs/DISPLAY_ON_DEMAND.md). Эти функции сохранены. Постоянной службы приёмника на ТВ нет.
+
+Актуально 10 октября: Manager0.6.4 и TV receiver0.4.1 установлены; отдельный Mac Display удалён из Applications с приватной копией для возврата. Manager компилирует тот же общий движок напрямую. [Исправление обрыва при движении окна/курсора и проверки](../../docs/DISPLAY_STREAM_STABILITY.md). Создание экрана/изображение подтверждены пользователем, устойчивость новой пары проверяется вручную.
+
+## История 0.3–0.4.3
+
+Mac Display обновлён до 0.4.1: [стабильная подпись и проверка ScreenCaptureKit](../../docs/CAPTURE_PERMISSION_FIX.md). TV receiver0.4 не менялся. Runtime захвата после исправления ещё не проверен.
+
+Актуально 10 октября: TV/Mac Display 0.4.0 установлены, интерфейс Display встроен в Manager0.6.0. [Исправление Keystore и успешная TLS-проверка на ТВ](../../docs/CONTROL_EXPANSION.md). Ключ ТВ изменён по отдельному согласию: заново подготовьте подключение в Manager. Захват и изображение ещё не проверены. Mac-приложения находятся в ~/Applications; пути build ниже относятся к самостоятельной сборке.
+
+TV localOptimized и резервный Mac Display0.3 установлены; основной интерфейс встроен в Manager0.5. На ТВ исправлен focus подтверждения, Manager проверяет готовность/доверие перед соединением, ошибки подключения уточнены. Build/core/lint/codesign прошли. Private API/capture/TLS/отдельный desktop ещё проверяет пользователь. [Итог и последовательность подключения](../../docs/USABILITY_REFINEMENT.md).
+
+## История 0.1–0.2
+
+TV Display0.2 localOptimized установлен; резервный Mac Display0.2 находится в Applications пользователя. Исправлен focus поля ТВ, добавлена автоматическая подготовка ключей в Manager0.4 и удобный ручной резерв. Runtime пока не проверен. [Функции и приёмка](../../docs/FINAL_REFINEMENT.md). Ниже — история прежней версии.
+
+Нативный дополнительный рабочий стол Mac → METZ: CGVirtualDisplay, ScreenCaptureKit, аппаратный VideoToolbox H.264 и Kotlin MediaCodec/SurfaceView. Mac и TV части реализованы и собираются. Приёмник установлен по отдельному согласию. **Пользователь выбрал проверить запуск сам: виртуальный дисплей, захват, TLS-сеанс и отображение на ТВ агентом не запускались. Работоспособность полного тракта пока не подтверждена.**
+
+Это текущая реализация единого этапа 13. Дальнейшие исправления определяются результатом ручной пробы, без остановок на внутренних A/B/C. Скорость и задержка не измерены.
+
+## Как запустить
+
+1. Откройте установленный **METZ Manager** из Applications и выберите страницу **Экран**. Выберите созданную папку проекта `local/display-identity` кнопкой «Выбрать папку ключа», если она ещё не сохранена. Ключ импортируется в память, содержимое не публикуется.
+2. Для нового ключа выберите проект и подключённый ТВ, нажмите «Подготовить подключение». На самом ТВ подтвердите «Доверять и принимать» один раз. При прежнем сохранённом ключе этот шаг повторять не нужно: кнопка подключения сама открывает приёмник. Альтернатива для первой подготовки — открыть METZ Display на ТВ и ввести отпечаток USB-клавиатурой.
+3. Перепишите показанный **отпечаток ТВ** в Mac-приложение одной строкой без пробелов; введите текущий локальный адрес ТВ. Проверьте оба отпечатка. Они закрепляют доверие к конкретным сертификатам, не являются паролями. До подтверждения доверия приёмник не слушает сеть.
+4. На Mac нажмите «Подключить второй экран». Кнопка запускает приёмник и выбранный виртуальный экран. Если macOS запросит **Screen Recording / Запись экрана**, разрешите именно METZ Manager; при необходимости перезапустите приложение после выдачи разрешения. Перенесите окно через край основного дисплея; расположение экранов задаётся в настройках macOS. Стартовый режим — 1280×720, максимум30/SDR; звук не передаётся. Перед пробой остановите видео в других TV-приложениях: аппаратный AVC-декодер допускает один экземпляр.
+5. Нажмите «Остановить» на Mac. Выход с Mac и уход приёмника в фон также завершают сессию и освобождают ресурсы. На ТВ Back закрывает приёмник; повторное подключение — кнопкой в Manager. Без TLS-подключения listener закрывается через20секунд, постоянного ожидания в фоне нет.
+
+Не запускайте `--check` для обычной работы: это отдельный агентский UI/runtime сценарий, который пользователь отказался запускать в этом сеансе. Не выдавайте ключи/`password.txt` третьим лицам; TLS использует системные библиотеки. Сертификаты созданы на год; при истечении или смене ключа нужно заново явно подтвердить обе стороны, без автоматической ротации.
+
+Резервный режим: если собственный private API не работает, можно заранее создать независимый виртуальный экран 1280×720 в уже имеющемся BetterDisplay или другом приложении. После этого в разделе «Экран» Manager выберите этот экран в списке и подтвердите, что он виртуальный. Программа не может достоверно определить происхождение внешнего экрана: выбор и подтверждение делает пользователь. Основной/built-in экран исключён; чужой экран METZ не перенастраивает и не удаляет при stop. Автоматического захвата другого монитора при ошибке нет. BetterDisplay не устанавливается и не является обязательной зависимостью.
+
+Во время приёма Menu на TV запрашивает свежий IDR; Mac обслуживает запрос через ForceKeyFrame. Полная очередь декодера ждёт свободное место до500мс, затем завершает сеанс при устойчивой перегрузке; TCP ограничивает отправителя, зависимые P-кадры не выбрасываются.
+
+## Что реализовано
+
+| Узел | Текущее поведение |
+|---|---|
+| VirtualDisplay adapter | Динамические class/selector checks, один retained display, checked init/apply, только 720p30 без Retina; private API совместимость неизвестна до ручного запуска |
+| Capture | Фильтр только собственного или явно подтверждённого существующего виртуального display ID, cursor включён, SDR BGRA, queueDepth3, interval1/30, complete samples и монотонные PTS; audio отключён |
+| FramePipeline/H264 | Один latest raw + один encode/send in-flight; hardware обязательный, Baseline3.1, RealTime, reorder=false, 3 Мбит/с, IDR до30 кадров; OSStatus проверяется. Собственного raw memcpy нет, zero-copy всего тракта не заявлен |
+| StreamTransport | Network.framework/JSSE, TLS1.2+, взаимная проверка полных SHA-256 leaf pins; сервер требует client certificate. Android key в Keystore; Mac PKCS12 импорт в память, приватная папка700/файлы600 |
+| Wire v1 | 24-байтный big-endian header, config/SPS/PPS до64 КиБ, Annex B access unit до1 МиБ, epoch/PTS/IDR, heartbeat каждые4 секунды при простое, подтверждение первого декодированного кадра. Не RTMP/Chromecast |
+| TV | Runtime hardware AVC capability gate, один decoder, очередь максимум2 access units с ожиданием до500мс, проверка размеров/PTS/epoch/SPS/PPS/IDR и input capacity; устойчивый overload завершает сеанс, зависимые P-frames не выкидываются по одному |
+| Lifecycle | Cancel/await start и capture stop, epoch guards, encoder drain/invalidate, освобождение display последним; sleep/смена размера/зеркалирование/потеря сети прекращают сессию. Reconnect только вручную, без автозапуска |
+| UI | Небольшой Mac UI в палитре METZ; TV ожидание/сопряжение и fullscreen SurfaceView, без WebView/blur/рекламы/записи медиа/постоянной службы |
+
+Сетевые сроки: TLS/connect 10 с, Mac send/heartbeat 2 с, TV read10 с, decoder input2 с; максимум5 неуспешных TLS handshake за один запуск listener. Сроки ОС start/stop capture и освобождение дисплея **ещё требуют реального испытания**, compile не доказывает их выполнение. Изменение resolution/epoch требует чистого переподключения в v1; runtime адаптации разрешения нет.
+
+## Подтверждённые возможности TV
+
+По отдельно разрешённому API query на METZ: `OMX.MS.AVC.Decoder` аппаратный/vendor, 720p30 supported, alignment2×2, maxInstances1, adaptive=true, lowLatency=false; среди профилей Baseline/Main/High с AVC Level4.1. Два программных декодера не заявили поддержку 720p30 в query. APK probe сразу завершился, не выделял decoder, не сохранял файл на TV. Это поддержка конфигурации, а не проверенный реальный сеанс.
+
+## Сборка и проверки
+
+Уже установленные Swift/Xcode и Android SDK/Gradle/JDK21; новых зависимостей или инструментов не устанавливалось. Gradle использует cached закреплённые версии и strict SHA-256 verification, Android Views/Kotlin без стороннего receiver SDK.
+
+```sh
+sh apps/metz-extended-display/mac/check.sh
+sh apps/metz-manager/build.sh
+# Задайте существующий JDK21 и Android SDK локально; пути не публикуйте
+gradle -p apps/metz-extended-display/tv --offline --dependency-verification strict assembleDebug checkStreamProtocol lintDebug
+```
+
+Mac core checks: framing, NAL boundaries/длины AVCC, pins, payload limits и nonfatal успешный frame drop. TV JVM checks: header sizes/types/epoch/PTS, oversized/negative input, IDR/pins и очередь с кратким/устойчивым backpressure. Mac identity import проверен без сети/GUI. Build и Android lint прошли; это не end-to-end/UI тест. Mac подписывается прежним существующим сертификатом; сборка не является notarized release.
+
+Дополнительно подготовлен TV localOptimized: debuggable=false, R8/minify/shrinkResources, та же локальная подпись; APK51 224 байта, strict offline assemble/lint прошли,0 ошибок/6 предупреждений. Он сохранён приватно и пока не установлен; текущий receiver на ТВ — debug. Команда сборки: assembleLocalOptimized lintLocalOptimized с теми же offline/strict параметрами. Размер APK не заменяет измерение памяти decoder.
+
+Источник выбора движка — [ENGINE_RESEARCH](docs/ENGINE_RESEARCH.md), закреплённые [SOURCE_PINS](docs/SOURCE_PINS.json). Заимствование минимальных приватных деклараций отмечено в [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md). Системные API сверены с [Apple ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit), [Apple local TLS identity](https://developer.apple.com/documentation/network/creating-an-identity-for-local-network-tls), [Android MediaCodec](https://developer.android.com/reference/android/media/MediaCodec) и [Android Keystore](https://developer.android.com/privacy-and-security/keystore).
+
+## Короткая ручная приёмка
+
+Проверить: успешное сопряжение; независимый desktop с переносом окна/курсором; читаемый текст; реальное изображение на ТВ; stop удаляет экран; повтор start/stop не накапливает display/decoder; сон и обрыв сети завершаются понятным состоянием; возврат к Home/YouTube освобождает единственный decoder. Скорость/задержку оценить руками в финале, не выводить из ping. Если сбой — сохранить точный шаг/сообщение без ключей/личного содержимого, затем исправлять соответствующий узел.

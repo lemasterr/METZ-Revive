@@ -66,3 +66,28 @@ fun searchApps(entries: List<AppEntry>, query: String): List<AppEntry> {
     val terms = query.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
     return entries.filter { entry -> terms.all { entry.label.contains(it, ignoreCase = true) } }
 }
+
+/** Two rows of five; empty and out-of-range pages never duplicate apps. */
+const val APPS_PER_PAGE = 10
+fun pageCount(size: Int, columns: Int = 5): Int {
+    require(columns in 4..6)
+    return (size.coerceAtLeast(0) + columns * 2 - 1) / (columns * 2)
+}
+fun appSlice(entries: List<AppEntry>, page: Int, columns: Int = 5): List<AppEntry> =
+    if (page < 0 || page >= pageCount(entries.size, columns)) emptyList() else entries.drop(page * columns * 2).take(columns * 2)
+
+/** Preserve the row when crossing a page edge; clamp sparse last pages. */
+fun pageEntryIndex(sourceIndex: Int, count: Int, forward: Boolean, columns: Int = 5): Int {
+    require(columns in 4..6)
+    if (count <= 0) return -1
+    val row = (sourceIndex.coerceAtLeast(0) / columns).coerceAtMost((count - 1) / columns)
+    return if (forward) row * columns else minOf(row * columns + columns - 1, count - 1)
+}
+
+/** Move without losing missing saved apps or changing the rest of the order. */
+fun moveFavorite(favorites: List<String>, name: String, delta: Int): List<String> {
+    val index = favorites.indexOf(name)
+    val target = index + delta
+    if (index < 0 || target !in favorites.indices) return favorites
+    return favorites.toMutableList().apply { val item = removeAt(index); add(target, item) }
+}

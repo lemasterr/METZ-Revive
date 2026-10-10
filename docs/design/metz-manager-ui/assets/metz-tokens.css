@@ -1,0 +1,36 @@
+/* METZ Manager UI v2 — semantic starter, adapt to actual application stack */
+:root {
+  color-scheme: dark;
+  --bg-app: #0C1118;
+  --bg-sidebar: #101720;
+  --bg-elevated: #17212D;
+  --bg-hover: #1F2B39;
+  --bg-pressed: #26364A;
+  --border-subtle: #26313E;
+  --text-primary: #F4F7FA;
+  --text-secondary: #B9C4D0;
+  --text-muted: #8D9BAA;
+  --accent: #6EA8FF;
+  --accent-soft: rgba(110, 168, 255, .12);
+  --accent-pressed: #90BBFF;
+  --focus-ring: #9AC4FF;
+  --success: #4ED9A0;
+  --warning: #F2C46A;
+  --danger: #FF8088;
+  --info: #92B9ED;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-7: 40px; --space-8: 48px;
+  --radius-input: 8px; --radius-button: 9px; --radius-popover: 10px;
+  --radius-remote: 14px; --sidebar-width: 216px; --topbar-height: 60px;
+  --control-height: 40px; --control-sm: 32px; --row-height: 44px;
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  --shadow-popup: 0 12px 36px rgba(0,0,0,.32);
+  --motion-fast: 120ms; --motion-menu: 170ms;
+}
+:where(button,select,input,textarea,[role="menuitem"],[role="tab"]):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --motion-fast: 0ms; --motion-menu: 0ms; }
+}
