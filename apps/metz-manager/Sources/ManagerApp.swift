@@ -98,7 +98,8 @@ final class ManagerModel: ObservableObject {
     }
 
     func control(_ action: TVAction) {
-        guard fastRemote, action.keyCode != nil else {
+        // Power-off bypasses the Home bridge's intentionally narrow key whitelist.
+        guard fastRemote, action.keyCode != nil, action != .powerOff else {
             operate { controller, serial in try controller.send(action, serial: serial); return nil }
             return
         }

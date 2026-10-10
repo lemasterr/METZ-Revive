@@ -59,6 +59,22 @@ struct FrameCadence {
     var maximumMS: Double? { intervals.max() }
 }
 
+/// Processing time of recent completed operations, bounded to two seconds at 60 FPS.
+struct FrameLatency {
+    private var samples: [Double] = []
+    mutating func record(seconds: Double) {
+        guard seconds.isFinite, seconds >= 0 else { return }
+        samples.append(seconds * 1000)
+        if samples.count > 120 { samples.removeFirst() }
+    }
+    var p95MS: Double? {
+        guard !samples.isEmpty else { return nil }
+        let sorted = samples.sorted()
+        return sorted[min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1)]
+    }
+    var maximumMS: Double? { samples.max() }
+}
+
 struct TVFrameReport: Equatable {
     let output: UInt64
     let rendered: UInt64

@@ -5,6 +5,13 @@ import ScreenCaptureKit
 struct CoreCheck {
     static func main() throws {
         var cadence = FrameCadence()
+        var latency = FrameLatency()
+        precondition(latency.p95MS == nil)
+        latency.record(seconds: .nan); latency.record(seconds: -1)
+        precondition(latency.maximumMS == nil)
+        latency.record(seconds: 10)
+        for _ in 0..<120 { latency.record(seconds: 0.002) }
+        precondition(latency.maximumMS == 2 && latency.p95MS == 2)
         cadence.record(0, expectedFPS: 60)
         cadence.record(1.0 / 60, expectedFPS: 60)
         cadence.record(0, expectedFPS: 60) // Out-of-order timestamps must not shift the origin.

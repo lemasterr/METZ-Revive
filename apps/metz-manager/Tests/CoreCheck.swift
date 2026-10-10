@@ -139,6 +139,7 @@ struct CoreCheck {
             print("Private local history integration: indexed \(history.count), parsed \(parsed.count), sound settings in \(parsed.filter { !$0.soundSettings.isEmpty }.count) snapshots; no raw output")
         }
         precondition(TVAction.up.shellArguments == ["input", "keyevent", "19"])
+        precondition(TVAction.powerOff.shellArguments == ["input", "keyevent", "223"])
         precondition(TVAction.settings.shellArguments == ["am", "start", "-a", "android.settings.SETTINGS"])
         precondition(validComponent("com.example.tv/.MainActivity"))
         for invalid in ["com.example/.Main;reboot", "com.example/$(id)", "com.example/.Main Activity", "../Main"] {

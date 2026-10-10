@@ -1,7 +1,7 @@
 import Foundation
 
 enum TVAction: String, CaseIterable {
-    case up, down, left, right, select, home, back, volumeUp, volumeDown, mute, playPause, enter, delete, menu, keyboardSettings, settings
+    case up, down, left, right, select, home, back, volumeUp, volumeDown, mute, playPause, enter, delete, menu, keyboardSettings, settings, powerOff
     var keyCode: Int? {
         switch self {
         case .up: return 19
@@ -18,6 +18,8 @@ enum TVAction: String, CaseIterable {
         case .enter: return 66
         case .delete: return 67
         case .menu: return 82
+        // SLEEP is idempotent; POWER would wake an already sleeping television.
+        case .powerOff: return 223
         case .settings, .keyboardSettings: return nil
         }
     }

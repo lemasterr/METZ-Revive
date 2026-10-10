@@ -20,13 +20,23 @@ private final class RuntimeMotionView: NSView {
 
 private final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     let pipeline: FramePipeline
+    private let lock = NSLock()
+    private var frameStates: [Int: Int] = [:]
+    var frameCounts: (complete: Int, idle: Int, other: Int) {
+        lock.lock(); defer { lock.unlock() }
+        let complete = frameStates[SCFrameStatus.complete.rawValue, default: 0]
+        let idle = frameStates[SCFrameStatus.idle.rawValue, default: 0]
+        return (complete, idle, frameStates.values.reduce(0, +) - complete - idle)
+    }
     var failure: ((String) -> Void)?
     init(pipeline: FramePipeline) { self.pipeline = pipeline }
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
         if type == .audio { submitAudio(sample); return }
         guard type == .screen, sample.isValid,
             let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-            let status = attachments.first?[.status] as? Int, status == SCFrameStatus.complete.rawValue,
+            let status = attachments.first?[.status] as? Int else { return }
+        lock.lock(); frameStates[status, default: 0] += 1; lock.unlock()
+        guard status == SCFrameStatus.complete.rawValue,
             let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
         pipeline.submit(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sample))
     }
@@ -73,6 +83,7 @@ final class ConnectionManager: ObservableObject {
     @Published private(set) var status = "Готов к подключению"
     @Published private(set) var active = false
     @Published private(set) var statistics = ""
+    @Published private(set) var processingStatistics = ""
     @Published private(set) var decodedOnTV = false
     @Published private(set) var isStopping = false
     @Published private(set) var configuredMode = StreamMode.conservative
@@ -131,7 +142,7 @@ final class ConnectionManager: ObservableObject {
         guard !active, !stopping, mode.valid else { return }
         self.mode = mode; self.audio = audio
         configuredMode = mode
-        active = true; status = "Проверка доступа к экрану…"; statistics = ""; decodedOnTV = false
+        active = true; status = "Проверка доступа к экрану…"; statistics = ""; processingStatistics = ""; decodedOnTV = false
         capturedFPS = nil; admittedFPS = nil; outputFPS = nil; renderedFPS = nil
         previousReport = nil; previousSample = nil
         let current = UUID(); token = current
@@ -279,9 +290,14 @@ final class ConnectionManager: ObservableObject {
             stage = .capture
             let configuration = SCStreamConfiguration()
             configuration.width = mode.width; configuration.height = mode.height
-            configuration.minimumFrameInterval = CMTime(value: 1, timescale: Int32(mode.fps))
-            configuration.queueDepth = 3; configuration.showsCursor = true
-            configuration.pixelFormat = kCVPixelFormatType_32BGRA
+            // Our virtual display already runs at the selected rate. A second
+            // asynchronous throttle can skip updates near the same frame boundary.
+            // Existing displays retain a cap because their refresh rate may differ.
+            configuration.minimumFrameInterval = handle != nil ? .zero : CMTime(value: 1, timescale: Int32(mode.fps))
+            // Five reusable NV12 surfaces absorb short encoder stalls without a
+            // growing app queue or an extra BGRA-to-YUV conversion in VideoToolbox.
+            configuration.queueDepth = 5; configuration.showsCursor = true
+            configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             configuration.capturesAudio = audio
             configuration.sampleRate = 48000; configuration.channelCount = 2
             configuration.excludesCurrentProcessAudio = true
@@ -306,6 +322,9 @@ final class ConnectionManager: ObservableObject {
                     self.previousSample = (now, captured, count.0)
                     func fps(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "нет данных" }
                     self.statistics = "Кадры/с · захват Mac: \(fps(self.capturedFPS)) · приём декодера: \(fps(self.admittedFPS)) · выход декодера: \(fps(self.outputFPS)) · Surface ТВ: \(fps(self.renderedFPS))\nПринято: \(count.0) кадров · пропущено до передачи: \(count.1)"
+                    let processing = pipeline.processing
+                    let frames = self.output?.frameCounts ?? (complete: 0, idle: 0, other: 0)
+                    self.processingStatistics = "Кодирование, p95: \(fps(processing.encoder.p95MS)) мс · подтверждение ТВ, p95: \(fps(processing.admission.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(processing.frames)"
                 }
             }
             startTask = nil
@@ -356,7 +375,7 @@ final class ConnectionManager: ObservableObject {
             }
         }
         captureDisplayID = 0
-        active = false; decodedOnTV = false; statistics = ""; status = reason
+        active = false; decodedOnTV = false; statistics = ""; processingStatistics = ""; status = reason
         capturedFPS = nil; admittedFPS = nil; outputFPS = nil; renderedFPS = nil
     }
 
@@ -421,6 +440,8 @@ final class ConnectionManager: ObservableObject {
                 let finalCount = pipeline?.counts ?? (0, 0), finalCaptured = pipeline?.capturedCount ?? 0
                 let tvRates = initialTV.flatMap { previousReport?.rates(since: $0) }
                 let timing = pipeline?.timing
+                let processing = pipeline?.processing
+                let captureCounts = output?.frameCounts
                 var run: [String: Any] = ["cycle": cycle, "started": true, "target_fps": requested.fps,
                     "width": requested.width, "height": requested.height,
                     "mode_matches": DisplayTopology.state(of: id)?.matches(requested) == true,
@@ -432,6 +453,14 @@ final class ConnectionManager: ObservableObject {
                 run["audio_packets_submitted"] = pipeline?.audioPacketCount ?? 0
                 run["stimulus_fps"] = Double(view.tick - initialTicks) / seconds
                 run["active_before_stop"] = active
+                run["capture_complete"] = captureCounts?.complete
+                run["capture_idle"] = captureCounts?.idle
+                run["capture_other"] = captureCounts?.other
+                run["codec_frames"] = processing?.frames
+                run["encoder_latency_p95_ms"] = processing?.encoder.p95MS
+                run["encoder_latency_max_ms"] = processing?.encoder.maximumMS
+                run["admission_latency_p95_ms"] = processing?.admission.p95MS
+                run["admission_latency_max_ms"] = processing?.admission.maximumMS
                 if let timing {
                     run["capture_interval_p95_ms"] = timing.0.p95MS
                     run["capture_interval_max_ms"] = timing.0.maximumMS

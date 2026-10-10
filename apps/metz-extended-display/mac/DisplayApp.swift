@@ -96,6 +96,7 @@ struct DisplayView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(manager.active ? "Задано: " + manager.configuredMode.title : "Нет активной трансляции").font(.callout)
                     if manager.active && !manager.statistics.isEmpty { Text(manager.statistics).font(.callout).monospacedDigit().textSelection(.enabled) }
+                    if manager.active && !manager.processingStatistics.isEmpty { Text(manager.processingStatistics).font(.caption).monospacedDigit().textSelection(.enabled) }
                     Text("Приём в декодер и вывод на Surface — разные замеры. Частота захвата снижается, когда изображение не меняется.").font(.caption).foregroundStyle(.secondary)
                     connectionDetails
                     Button("Доступ к записи экрана…") {
