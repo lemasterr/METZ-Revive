@@ -1,0 +1,25 @@
+# Private diagnostics and machine-specific configuration
+/local/
+/.codex-project.json
+.env
+.env.*
+auth.json
+adbkey*
+*.pem
+*.key
+
+# Generated outputs
+__pycache__/
+*.py[cod]
+.DS_Store
+.gradle/
+.kotlin/
+local.properties
+build/
+DerivedData/
+*.apk
+*.aab
+*.app/
+*.log
+*.zip
+*.tar*
