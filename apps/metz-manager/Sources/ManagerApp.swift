@@ -55,8 +55,17 @@ final class ManagerModel: ObservableObject {
     private var reconnectAfter = Date.distantPast
     @Published var profile = DiagnosticProfile.audio
     @Published var busy = false {
-        didSet { ManagerAppDelegate.operationActive = busy }
+        didSet {
+            ManagerAppDelegate.operationActive = busy
+            if busy && operationActivity == nil {
+                operationActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                    reason: "Управление телевизором по запросу пользователя")
+            } else if !busy, let activity = operationActivity {
+                ProcessInfo.processInfo.endActivity(activity); operationActivity = nil
+            }
+        }
     }
+    private var operationActivity: NSObjectProtocol?
     @Published var status = "Выберите папку METZ Revive"
     @Published var summary: SnapshotSummary?
     @Published var snapshot: URL?
@@ -257,24 +266,39 @@ final class ManagerModel: ObservableObject {
         busy = true
         let serial = device.serial
         Task {
-            let ready = await Task.detached { () -> ReceiverReadiness? in
+            let result = await Task.detached { () -> Result<ReceiverReadiness, Error> in
                 let controller = TVController(adb: adb)
-                guard let trusted = try? controller.activateDisplaySession(pin: pin, serial: serial) else { return nil }
-                if !trusted { return ReceiverReadiness(listening: false, trusted: false) }
-                for _ in 0..<10 {
-                    guard let state = try? controller.receiverHealth(pin: pin, serial: serial) else { return nil }
-                    if state.listening { return state }
-                    try? await Task.sleep(nanoseconds: 200_000_000)
-                }
-                return ReceiverReadiness(listening: false, trusted: true)
+                do {
+                    for attempt in 0..<2 {
+                        let trusted = try controller.activateDisplaySession(pin: pin, serial: serial)
+                        if !trusted { return .success(ReceiverReadiness(listening: false, trusted: false)) }
+                        // An Activity finishing the previous session can outlive the first launch.
+                        // Rearm once for this saved peer only; never reconnect or poll in the background.
+                        let deadline = ProcessInfo.processInfo.systemUptime + 6
+                        var responded = false
+                        for _ in 0..<25 {
+                            if let state = try? controller.receiverHealth(pin: pin, serial: serial) {
+                                responded = true
+                                if state.listening { return .success(state) }
+                            }
+                            if ProcessInfo.processInfo.systemUptime >= deadline { break }
+                            try? await Task.sleep(nanoseconds: 200_000_000)
+                        }
+                        if !responded { throw TVControlError.displayStage("STATUS") }
+                        if attempt == 0 { try? await Task.sleep(nanoseconds: 500_000_000) }
+                    }
+                    return .success(ReceiverReadiness(listening: false, trusted: true))
+                } catch { return .failure(error) }
             }.value
             busy = false
             guard selectedSerial == serial else { completion("Телевизор изменился. Подготовьте подключение заново."); return }
-            if let ready {
+            if case .success(let ready) = result {
                 controlStatus = ready.message ?? "Приёмник ТВ готов"
                 completion(ready.message)
             }
-            else { completion("ADB недоступен или Display не отвечает. Проверьте соединение, затем подготовьте подключение.") }
+            else if case .failure(TVControlError.displayStage(let stage)) = result {
+                completion("Приёмник ТВ не ответил [TV_\(stage)]. Проверьте соединение и повторите подключение.")
+            } else { completion("ADB недоступен или Display не отвечает. Проверьте соединение, затем подготовьте подключение.") }
         }
     }
     func checkConnection() {

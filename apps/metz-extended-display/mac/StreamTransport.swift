@@ -28,20 +28,21 @@ struct StreamIdentity {
     }
 }
 
-/// Single ordered send in flight; no growing queue or dropped H.264 reference frames.
+/// Ordered sends with explicitly bounded decoder credit; no dropped reference frames.
 protocol FramePacketTransport: AnyObject {
+    var frameCapacity: Int { get }
     func send(_ data: Data, pts: UInt64, completion: @escaping (Bool) -> Void)
     func sendAudio(_ data: Data)
 }
+extension FramePacketTransport { var frameCapacity: Int { 1 } }
 final class StreamTransport: FramePacketTransport, @unchecked Sendable {
-    private let queue = DispatchQueue(label: "metz.stream.transport")
+    private let queue = DispatchQueue(label: "metz.stream.transport", qos: .userInteractive)
     private var connection: NWConnection?
-    private var sending = false
+    let frameCapacity: Int
     private var protocolReady = false
-    private var delivery = FrameDeliveryGate()
-    private var sendCompletion: ((Bool) -> Void)?
+    private var delivery: FrameDeliveryWindow
+    private var sendCompletions: [UInt64: (Bool) -> Void] = [:]
     private var generation = UUID()
-    private var sendSequence: UInt64 = 0
     private var heartbeat: DispatchSourceTimer?
     private var heartbeatPending = false
     private var audioWrites = WriteDeadlineGate()
@@ -52,6 +53,10 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
     var keyframeRequested: (() -> Void)?
     var ready: (() -> Void)?
     var failure: ((String) -> Void)?
+    init(frameCapacity: Int = 2) {
+        self.frameCapacity = frameCapacity
+        delivery = FrameDeliveryWindow(capacity: frameCapacity)
+    }
 
     func connect(host: String, pin: String, identity: StreamIdentity) throws {
         guard Wire.validPin(pin), !host.isEmpty, host.count <= 253,
@@ -83,8 +88,8 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
         let connection = NWConnection(host: NWEndpoint.Host(host), port: 47_421, using: parameters)
         queue.async {
             self.connection?.cancel()
-            self.completeSend(false)
-            self.generation = UUID(); self.connection = connection; self.sending = false; self.protocolReady = false; self.audioWrites = WriteDeadlineGate()
+            self.cancelSends()
+            self.generation = UUID(); self.connection = connection; self.protocolReady = false; self.audioWrites = WriteDeadlineGate()
             self.trustFailure = nil; self.waitingError = nil
             let token = self.generation
             connection.stateUpdateHandler = { [weak self] state in
@@ -108,24 +113,24 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
 
     func send(_ data: Data, pts: UInt64, completion: @escaping (Bool) -> Void) {
         queue.async {
-            guard let connection = self.connection, connection.state == .ready, self.protocolReady, !self.sending,
-                  data.count <= Wire.maximumPayload + Wire.headerSize + 65_560 else {
+            guard let connection = self.connection, connection.state == .ready, self.protocolReady,
+                  data.count <= Wire.maximumPayload + Wire.headerSize + 65_560, self.delivery.reserve(pts) else {
                 completion(false); return
             }
-            self.sending = true
-            self.delivery = FrameDeliveryGate(pts: pts); self.sendCompletion = completion
+            self.sendCompletions[pts] = completion
             let token = self.generation
-            self.sendSequence &+= 1
-            let sequence = self.sendSequence
             connection.send(content: data, completion: .contentProcessed { error in
                 guard self.generation == token else { return }
                 if error != nil { self.fail(); return }
-                self.delivery.markWritten()
-                if self.delivery.complete { self.completeSend(true) }
+                switch self.delivery.markWritten(pts) {
+                case .complete: self.completeSend(pts, success: true)
+                case .waiting: break
+                case .invalid: self.fail()
+                }
             })
             self.queue.asyncAfter(deadline: .now() + 3) {
-                if self.generation == token && self.sendSequence == sequence && self.sending {
-                    self.fail(self.delivery.written ? "Декодер ТВ не подтвердил приём кадра за 3 секунды." : "Передача кадра на ТВ остановилась.")
+                if self.generation == token && self.delivery.contains(pts) {
+                    self.fail(self.delivery.written(pts) ? "Декодер ТВ не подтвердил приём кадра за 3 секунды." : "Передача кадра на ТВ остановилась.")
                 }
             }
         }
@@ -196,9 +201,12 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
     private func readFrameReceipt(_ connection: NWConnection, token: UUID) {
         connection.receive(minimumIncompleteLength: 8, maximumLength: 8) { [weak self] data, _, ended, error in
             guard let self, self.generation == token else { return }
-            guard let data, let pts = try? Wire.receiptPTS(data), !ended, error == nil,
-                self.sending, self.delivery.acknowledge(pts: pts) else { self.fail(); return }
-            if self.delivery.complete { self.completeSend(true) }
+            guard let data, let pts = try? Wire.receiptPTS(data), !ended, error == nil else { self.fail(); return }
+            switch self.delivery.acknowledge(pts) {
+            case .complete: self.completeSend(pts, success: true)
+            case .waiting: break
+            case .invalid: self.fail(); return
+            }
             self.readReceipt(connection, token: token)
         }
     }
@@ -207,7 +215,7 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 4, repeating: 4)
         timer.setEventHandler { [weak self] in
-            guard let self, self.generation == token, !self.sending, !self.heartbeatPending else { return }
+            guard let self, self.generation == token, self.delivery.isEmpty, !self.heartbeatPending else { return }
             guard let ping = try? Wire.packet(type: 3, epoch: 1, payload: Data()) else { return }
             self.heartbeatPending = true
             connection.send(content: ping, completion: .contentProcessed { error in
@@ -231,16 +239,21 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
         heartbeat?.cancel(); heartbeat = nil
         connection?.cancel(); connection = nil; generation = UUID(); protocolReady = false; audioWrites = WriteDeadlineGate()
         failure?(reason)
-        completeSend(false)
+        cancelSends()
     }
-    private func completeSend(_ success: Bool) {
-        let completion = sendCompletion; sendCompletion = nil; sending = false
+    private func completeSend(_ pts: UInt64, success: Bool) {
+        let completion = sendCompletions.removeValue(forKey: pts)
         completion?(success)
+    }
+    private func cancelSends() {
+        let completions = Array(sendCompletions.values)
+        sendCompletions.removeAll(); delivery = FrameDeliveryWindow(capacity: frameCapacity)
+        completions.forEach { $0(false) }
     }
     func stop() {
         queue.async {
             self.heartbeat?.cancel(); self.heartbeat = nil; self.connection?.cancel(); self.connection = nil
-            self.generation = UUID(); self.protocolReady = false; self.completeSend(false)
+            self.generation = UUID(); self.protocolReady = false; self.cancelSends()
         }
     }
     func stopAndWait() async {
@@ -248,7 +261,7 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
             queue.async {
                 self.heartbeat?.cancel(); self.heartbeat = nil
                 self.connection?.cancel(); self.connection = nil
-                self.generation = UUID(); self.protocolReady = false; self.completeSend(false)
+                self.generation = UUID(); self.protocolReady = false; self.cancelSends()
                 continuation.resume()
             }
         }

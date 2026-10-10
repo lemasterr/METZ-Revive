@@ -176,7 +176,7 @@ struct CoreCheck {
           case "$*" in
             *SessionRequestReceiver*bbbb*) printf 'Broadcast completed: result=0, data="METZ_SESSION_NEEDS_TRUST"\\n' ;;
             *SessionRequestReceiver*) printf 'Broadcast completed: result=0, data="METZ_SESSION_TRUSTED"\\n' ;;
-            *'start -n com.metzrevive.display/.ReceiverActivity'*) printf 'Starting: Intent\\n' ;;
+            *'start -n com.metzrevive.display/.ReceiverActivity'*) printf 'Starting: Intent\\n'; printf 'Warning: Activity not started, intent has been delivered to currently running top-most instance.\\n' >&2 ;;
             *AppearanceReceiver*) printf 'Broadcast completed: result=0, data="{"columns":5,"titles":"auto","order":"HOME,APPS,SETTINGS"}"\\n' ;;
             *'operation search'*) printf 'Broadcast completed: result=0, data="METZ_TEXT_COMMITTED"\\n' ;;
             *'operation clear'*|*'operation text'*) printf 'Broadcast completed: result=0, data="METZ_TEXT_OK"\\n' ;;

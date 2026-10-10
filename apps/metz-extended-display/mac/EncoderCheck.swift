@@ -34,24 +34,26 @@ private final class EncoderSink: FramePacketTransport {
 
 private final class HeldFrameSink: FramePacketTransport {
     private let lock = NSLock()
-    private var callback: ((Bool) -> Void)?
+    let frameCapacity: Int
+    init(capacity: Int) { frameCapacity = capacity }
+    private var callbacks: [(Bool) -> Void] = []
     private var timestamps: [UInt64] = []
     var sent: [UInt64] { lock.lock(); defer { lock.unlock() }; return timestamps }
     func send(_ data: Data, pts: UInt64, completion: @escaping (Bool) -> Void) {
         lock.lock(); defer { lock.unlock() }
-        precondition(callback == nil, "Concurrent compressed sends")
+        precondition(callbacks.count < frameCapacity, "Exceeded compressed credit")
         precondition(timestamps.last.map { $0 < pts } ?? true, "Compressed PTS reordered")
-        timestamps.append(pts); callback = completion
+        timestamps.append(pts); callbacks.append(completion)
     }
     func sendAudio(_ data: Data) { preconditionFailure("Generated video check only") }
     func release() {
-        lock.lock(); let completed = callback; callback = nil; lock.unlock()
+        lock.lock(); let completed = callbacks.isEmpty ? nil : callbacks.removeFirst(); lock.unlock()
         completed?(true)
     }
 }
 
-private func checkBoundedOverlap() throws {
-    let sink = HeldFrameSink(), mode = StreamMode(width: 1366, height: 768, fps: 60)
+private func checkBoundedOverlap(capacity: Int) throws {
+    let sink = HeldFrameSink(capacity: capacity), mode = StreamMode(width: 1366, height: 768, fps: 60)
     let pipeline = try FramePipeline(transport: sink, mode: mode)
     defer { pipeline.stop() }
     pipeline.failure = { _ in preconditionFailure("Generated pipeline failed") }
@@ -71,18 +73,18 @@ private func checkBoundedOverlap() throws {
         pipeline.submit(buffer, pts: CMTime(value: Int64(frame), timescale: 60))
         Thread.sleep(forTimeInterval: 0.004)
     }
-    wait { pipeline.processing.frames == 2 }
-    precondition(sink.sent.count == 1 && pipeline.counts.0 == 0 && pipeline.counts.1 > 0)
+    wait { pipeline.processing.frames == capacity + 1 }
+    precondition(sink.sent.count == capacity && pipeline.counts.0 == 0 && pipeline.counts.1 > 0)
     sink.release()
-    wait { pipeline.processing.frames == 3 && pipeline.counts.0 == 1 }
-    precondition(sink.sent.count == 2)
+    wait { pipeline.processing.frames == capacity + 2 && pipeline.counts.0 == 1 }
+    precondition(sink.sent.count == capacity + 1)
     sink.release()
-    wait { sink.sent.count == 3 && pipeline.counts.0 == 2 }
+    wait { sink.sent.count == capacity + 2 && pipeline.counts.0 == 2 }
     precondition(sink.sent.last == UInt64(59 * 1_000_000 / 60), "Latest raw frame was not selected")
     pipeline.stop(); let admitted = pipeline.counts.0
-    sink.release(); Thread.sleep(forTimeInterval: 0.05)
+    for _ in 0..<capacity { sink.release() }; Thread.sleep(forTimeInterval: 0.05)
     precondition(pipeline.counts.0 == admitted, "Late ACK changed stopped counters")
-    print("Bounded overlap, compressed ordering, latest raw selection and late ACK after stop passed")
+    print("Bounded overlap/order/latest raw/late ACK passed with credit \(capacity)")
 }
 @main
 struct EncoderCheck {
@@ -120,6 +122,7 @@ struct EncoderCheck {
             print("Hardware generated frames passed: \(mode.id), pixel format \(pixelFormat)")
         } }
         print("\(StreamMode.candidates.count * 4) generated frames; no captured content, display/private API, network, UI or speed benchmark.")
-        try checkBoundedOverlap()
+        try checkBoundedOverlap(capacity: 1)
+        try checkBoundedOverlap(capacity: 2)
     }
 }

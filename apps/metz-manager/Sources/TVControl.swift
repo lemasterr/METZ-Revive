@@ -54,7 +54,7 @@ func parseTVApplications(_ output: String) -> [TVApplication] {
     return Array(Set(values.filter(validComponent))).sorted().prefix(80).map { TVApplication(component: $0) }
 }
 
-enum TVControlError: Error { case unavailable, invalidComponent, failed }
+enum TVControlError: Error { case unavailable, invalidComponent, failed, displayStage(String) }
 
 func normalizedADBTarget(_ value: String) -> String? {
     let parts = value.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ":", omittingEmptySubsequences: false)
@@ -68,7 +68,7 @@ func normalizedADBTarget(_ value: String) -> String? {
 
 struct TVController {
     let adb: URL
-    func execute(serial: String, shell: [String], maximumOutputBytes: Int = 1024 * 1024) throws -> CommandResult {
+    func execute(serial: String, shell: [String], maximumOutputBytes: Int = 1024 * 1024, allowedErrorLines: Set<String> = []) throws -> CommandResult {
         let devices = try runCommand(executable: adb, arguments: ["devices", "-l"], timeout: 10)
         guard adbSucceeded(devices),
               parseDevices(devices.output).contains(where: { $0.serial == serial && $0.available }) else {
@@ -76,7 +76,9 @@ struct TVController {
         }
         let result = try runCommand(executable: adb, arguments: ["-s", serial, "shell"] + shell, timeout: 10,
             maximumOutputBytes: maximumOutputBytes)
-        guard adbSucceeded(result),
+        let benignWarning = result.exitCode == 0 && !result.timedOut && !result.truncated && result.hasErrorOutput &&
+            result.errorOutput.split(separator: "\n").allSatisfy { allowedErrorLines.contains($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard adbSucceeded(result) || benignWarning,
               !result.output.contains("Error:"), !result.output.contains("Exception") else { throw TVControlError.failed }
         return result
     }
@@ -155,16 +157,21 @@ struct TVController {
     func preparePairing(pin: String, serial: String) throws {
         guard pin.count == 64, pin.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { throw TVControlError.invalidComponent }
         _ = try execute(serial: serial, shell: ["am", "start", "-n", "com.metzrevive.display/.ReceiverActivity",
-                                               "--es", "peer_pin", pin.lowercased()])
+                                               "--es", "peer_pin", pin.lowercased()], allowedErrorLines: [
+            "Warning: Activity not started, intent has been delivered to currently running top-most instance.",
+            "Warning: Activity not started, its current task has been brought to the front."])
     }
     func activateDisplaySession(pin: String, serial: String) throws -> Bool {
         guard validFingerprint(pin) else { throw TVControlError.invalidComponent }
-        let requested = try execute(serial: serial, shell: ["am", "broadcast", "-n",
-            "com.metzrevive.display/.SessionRequestReceiver", "--es", "peer_pin", pin.lowercased()])
+        let requested: CommandResult
+        do { requested = try execute(serial: serial, shell: ["am", "broadcast", "-n",
+            "com.metzrevive.display/.SessionRequestReceiver", "--es", "peer_pin", pin.lowercased()]) }
+        catch { throw TVControlError.displayStage("REQUEST") }
         guard let trusted = parseSessionRequest(requested.output) else { throw TVControlError.failed }
         // The protected broadcast arms a one-shot launch only for the saved certificate.
         // Explicit ADB activity launch works even when the receiver process was evicted.
-        try preparePairing(pin: pin, serial: serial)
+        do { try preparePairing(pin: pin, serial: serial) }
+        catch { throw TVControlError.displayStage("LAUNCH") }
         return trusted
     }
 }
