@@ -23,11 +23,11 @@ final class FramePipeline: @unchecked Sendable {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "metz.stream.encoder", qos: .userInteractive)
     private var session: VTCompressionSession?
-    private var pending: (CVPixelBuffer, CMTime)?
+    private var pending: (CVPixelBuffer, CMTime, Double)?
     // Encoder and transmission overlap, but compressed reference frames remain ordered.
-    // At most one encode, one queued packet and one transmission can exist.
+    // At most one encode, one queued packet and two transmissions can exist.
     private var encoding = false // encoder queue only
-    private var sending = false // encoder queue only
+    private var sending = 0 // encoder queue only
     private var queuedPacket: (Data, UInt64)? // encoder queue only
     private var encodingBegan = 0.0
     private var stopped = false
@@ -36,8 +36,12 @@ final class FramePipeline: @unchecked Sendable {
     private var forceIDR = true
     private var encoded = 0
     private var captured = 0
+    private var frameSelector = FrameRateSelector()
+    private let paceFrames: Bool
     private var audioSubmitted = 0
     private var codecFrames = 0
+    private var videoBytes = 0
+    private var rawQueue = FrameLatency()
     private var encoderLatency = FrameLatency()
     private var admissionLatency = FrameLatency()
     private var captureCadence = FrameCadence()
@@ -52,13 +56,13 @@ final class FramePipeline: @unchecked Sendable {
     var capturedCount: Int { lock.lock(); defer { lock.unlock() }; return captured }
     var audioPacketCount: Int { lock.lock(); defer { lock.unlock() }; return audioSubmitted }
     var timing: (FrameCadence, FrameCadence) { lock.lock(); defer { lock.unlock() }; return (captureCadence, admissionCadence) }
-    var processing: (frames: Int, encoder: FrameLatency, admission: FrameLatency) {
-        lock.lock(); defer { lock.unlock() }; return (codecFrames, encoderLatency, admissionLatency)
+    var processing: (frames: Int, bytes: Int, rawQueue: FrameLatency, encoder: FrameLatency, admission: FrameLatency) {
+        lock.lock(); defer { lock.unlock() }; return (codecFrames, videoBytes, rawQueue, encoderLatency, admissionLatency)
     }
 
-    init(transport: FramePacketTransport, mode: StreamMode = .conservative, audio: Bool = false) throws {
+    init(transport: FramePacketTransport, mode: StreamMode = .conservative, audio: Bool = false, paceFrames: Bool = false) throws {
         guard mode.valid else { throw StreamError.invalid }
-        self.transport = transport; self.mode = mode; self.audio = audio
+        self.transport = transport; self.mode = mode; self.audio = audio; self.paceFrames = paceFrames
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(mode.width), height: Int32(mode.height),
             codecType: kCMVideoCodecType_H264,
@@ -105,12 +109,12 @@ final class FramePipeline: @unchecked Sendable {
         guard !stopped else { lock.unlock(); return }
         captured += 1
         captureCadence.record(pts.seconds, expectedFPS: mode.fps)
+        if paceFrames && !frameSelector.accepts(pts.seconds, fps: mode.fps) { lock.unlock(); return }
         if pending != nil { dropped += 1 }
-        pending = (buffer, pts)
+        pending = (buffer, pts, ProcessInfo.processInfo.systemUptime)
         lock.unlock()
         queue.async { self.encodeNext() }
     }
-
     func requestKeyframe() { queue.async {
         self.lock.lock(); let inactive = self.stopped; self.lock.unlock()
         if !inactive { self.forceIDR = true }
@@ -135,6 +139,7 @@ final class FramePipeline: @unchecked Sendable {
         var flags: VTEncodeInfoFlags = []
         encoding = true
         encodingBegan = ProcessInfo.processInfo.systemUptime
+        lock.lock(); rawQueue.record(seconds: encodingBegan - frame.2); lock.unlock()
         let status = VTCompressionSessionEncodeFrame(session, imageBuffer: frame.0, presentationTimeStamp: pts,
             duration: CMTime(value: 1, timescale: Int32(mode.fps)), frameProperties: properties,
             sourceFrameRefcon: nil, infoFlagsOut: &flags)
@@ -194,7 +199,7 @@ final class FramePipeline: @unchecked Sendable {
             guard us >= 0 else { throw StreamError.invalid }
             packets.append(try Wire.packet(type: 2, flags: key ? 1 : 0, epoch: epoch, pts: UInt64(us),
                 payload: Wire.annexB(avcc, nalLength: Int(nalLength))))
-            lock.lock(); codecFrames += 1
+            lock.lock(); codecFrames += 1; videoBytes += packets.count
             encoderLatency.record(seconds: ProcessInfo.processInfo.systemUptime - encodingBegan)
             lock.unlock()
             encoding = false
@@ -213,11 +218,11 @@ final class FramePipeline: @unchecked Sendable {
         transport.sendAudio(packet)
     }
     private func sendNext() {
-        guard !sending, let packet = queuedPacket else { return }
+        guard sending < min(2, max(1, transport.frameCapacity)), let packet = queuedPacket else { return }
         lock.lock(); let inactive = stopped; lock.unlock()
         guard !inactive else { return }
         queuedPacket = nil
-        sending = true
+        sending += 1
         let began = ProcessInfo.processInfo.systemUptime
         transport.send(packet.0, pts: packet.1) { [weak self] success in
             guard let self else { return }
@@ -230,7 +235,7 @@ final class FramePipeline: @unchecked Sendable {
                     self.admissionLatency.record(seconds: ProcessInfo.processInfo.systemUptime - began)
                 }
                 self.lock.unlock()
-                self.sending = false
+                self.sending -= 1
                 guard success else { self.failed("Не удалось передать кадр на ТВ."); return }
                 self.sendNext()
                 self.encodeNext()
@@ -245,7 +250,7 @@ final class FramePipeline: @unchecked Sendable {
         lock.lock(); stopped = true; pending = nil; lock.unlock()
         queue.sync {
             queuedPacket = nil
-            encoding = false; sending = false
+            encoding = false; sending = 0
             if let session {
                 VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
                 VTCompressionSessionInvalidate(session)

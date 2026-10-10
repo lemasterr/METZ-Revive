@@ -4,6 +4,30 @@ import ScreenCaptureKit
 @main
 struct CoreCheck {
     static func main() throws {
+        var credits = FrameDeliveryWindow(capacity: 2)
+        precondition(credits.reserve(1) && credits.reserve(2) && !credits.reserve(3))
+        precondition(credits.acknowledge(2) == .invalid)
+        precondition(credits.acknowledge(1) == .waiting)
+        precondition(credits.markWritten(1) == .complete)
+        precondition(credits.markWritten(2) == .waiting)
+        precondition(credits.acknowledge(2) == .complete && credits.isEmpty)
+        precondition(!credits.reserve(2) && credits.reserve(3))
+        precondition(credits.markWritten(3) == .waiting && credits.markWritten(3) == .invalid)
+        precondition(credits.acknowledge(3) == .complete && credits.acknowledge(3) == .invalid)
+
+        for fps in [30, 50] {
+            var selector = FrameRateSelector(), accepted = 0
+            for frame in 0..<600 {
+                let jitter = frame % 2 == 0 ? 0.0001 : -0.0001
+                if selector.accepts(100 + Double(frame) / 60 + jitter, fps: fps) { accepted += 1 }
+            }
+            precondition(accepted == fps * 10, "Frame selection must retain target cadence despite source jitter")
+            precondition(!selector.accepts(.nan, fps: fps))
+            precondition(!selector.accepts(100, fps: fps))
+            precondition(selector.accepts(120, fps: fps))
+            precondition(!selector.accepts(120.001, fps: fps), "A stall must not cause a replay burst")
+        }
+
         var cadence = FrameCadence()
         var latency = FrameLatency()
         precondition(latency.p95MS == nil)

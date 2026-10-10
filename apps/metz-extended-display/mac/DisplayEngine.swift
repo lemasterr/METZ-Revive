@@ -9,13 +9,25 @@ import QuartzCore
 @MainActor
 private final class RuntimeMotionView: NSView {
     private(set) var tick = 0
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.black.setFill(); bounds.fill()
-        NSColor.systemBlue.setFill()
-        let offset = CGFloat(tick % 180) / 180 * max(0, bounds.width - 120)
-        NSRect(x: offset, y: 0, width: 120, height: bounds.height).fill()
+    func startMotion() {
+        wantsLayer = true
+        guard let layer, bounds.width > 120 else { return }
+        layer.backgroundColor = NSColor.black.cgColor
+        let bar = CALayer()
+        bar.bounds = CGRect(x: 0, y: 0, width: 120, height: bounds.height)
+        bar.position = CGPoint(x: 60, y: bounds.midY)
+        bar.backgroundColor = NSColor.systemBlue.cgColor
+        layer.addSublayer(bar)
+        let movement = CABasicAnimation(keyPath: "position.x")
+        movement.fromValue = 60; movement.toValue = bounds.width - 60
+        movement.duration = 3; movement.autoreverses = true
+        movement.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+        movement.repeatCount = .greatestFiniteMagnitude
+        movement.timingFunction = CAMediaTimingFunction(name: .linear)
+        bar.add(movement, forKey: "runtimeMotion")
     }
-    @objc func advance(_ link: CADisplayLink) { tick += 1; needsDisplay = true; displayIfNeeded() }
+    // This counts clock callbacks only. Captured complete frames measure compositor output.
+    @objc func advance(_ link: CADisplayLink) { tick += 1 }
 }
 
 private final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
@@ -80,6 +92,7 @@ private final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDele
 
 @MainActor
 final class ConnectionManager: ObservableObject {
+    private var streamActivity: NSObjectProtocol?
     @Published private(set) var status = "Готов к подключению"
     @Published private(set) var active = false
     @Published private(set) var statistics = ""
@@ -92,7 +105,7 @@ final class ConnectionManager: ObservableObject {
     @Published private(set) var outputFPS: Double?
     @Published private(set) var renderedFPS: Double?
     private var previousReport: TVFrameReport?
-    private var previousSample: (time: Double, captured: Int, admitted: Int)?
+    private var previousSample: (time: Double, captured: Int, admitted: Int, bytes: Int)?
     @Published private(set) var lastFailure = UserDefaults.standard.string(forKey: "displayLastFailure") ?? ""
     private var lastDisplayID: CGDirectDisplayID = 0
     private var captureDisplayID: CGDirectDisplayID = 0
@@ -143,6 +156,8 @@ final class ConnectionManager: ObservableObject {
         self.mode = mode; self.audio = audio
         configuredMode = mode
         active = true; status = "Проверка доступа к экрану…"; statistics = ""; processingStatistics = ""; decodedOnTV = false
+        streamActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+            reason: "Передача второго экрана на телевизор")
         capturedFPS = nil; admittedFPS = nil; outputFPS = nil; renderedFPS = nil
         previousReport = nil; previousSample = nil
         let current = UUID(); token = current
@@ -200,6 +215,7 @@ final class ConnectionManager: ObservableObject {
         do {
             status = "Создание второго экрана…"
             let id: CGDirectDisplayID
+            let sourceMode = StreamMode(width: mode.width, height: mode.height, fps: 60)
             if let existingVirtualDisplay {
                 // Explicit user selection only. Never fall back to an arbitrary physical screen.
                 guard existingVirtualDisplay != CGMainDisplayID(),
@@ -208,7 +224,7 @@ final class ConnectionManager: ObservableObject {
                 id = existingVirtualDisplay
             } else {
                 var failure = METZDisplayFailure.none
-                guard let created = METZCreateDisplayWithMode(UInt32(mode.width), UInt32(mode.height), UInt32(mode.fps), &failure) else { throw VirtualDisplayFailure.creation(Int(failure.rawValue)) }
+                guard let created = METZCreateDisplayWithMode(UInt32(mode.width), UInt32(mode.height), UInt32(sourceMode.fps), &failure) else { throw VirtualDisplayFailure.creation(Int(failure.rawValue)) }
                 handle = created
                 var identifier = METZDisplayID(created)
                 for _ in 0..<50 {
@@ -235,7 +251,7 @@ final class ConnectionManager: ObservableObject {
                 for _ in 0..<30 {
                     try Task.checkCancellation()
                     let modes = CGDisplayCopyAllDisplayModes(id, nil) as? [CGDisplayMode] ?? []
-                    requested = modes.first { DisplayModeChoice.matches(width: $0.pixelWidth, height: $0.pixelHeight, rate: $0.refreshRate, requested: mode) }
+                    requested = modes.first { DisplayModeChoice.matches(width: $0.pixelWidth, height: $0.pixelHeight, rate: $0.refreshRate, requested: sourceMode) }
                     if requested != nil { break }
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
@@ -279,7 +295,7 @@ final class ConnectionManager: ObservableObject {
             try Task.checkCancellation()
             guard token == current, let display = content.displays.first(where: { $0.displayID == id }) else { throw StreamError.unavailable }
             stage = .encoder
-            let encoder = try FramePipeline(transport: transport, mode: mode, audio: audio)
+            let encoder = try FramePipeline(transport: transport, mode: mode, audio: audio, paceFrames: handle != nil && mode.fps < 60)
             pipeline = encoder
             let failure: (String) -> Void = { [weak self] reason in Task { @MainActor in
                 guard let self, self.token == current else { return }
@@ -290,41 +306,41 @@ final class ConnectionManager: ObservableObject {
             stage = .capture
             let configuration = SCStreamConfiguration()
             configuration.width = mode.width; configuration.height = mode.height
-            // Our virtual display already runs at the selected rate. A second
-            // asynchronous throttle can skip updates near the same frame boundary.
-            // Existing displays retain a cap because their refresh rate may differ.
+            // Keep the owned compositor at 60 Hz. Select fresh frames on one
+            // timeline for lower stream rates, instead of stacking equal-rate throttles.
             configuration.minimumFrameInterval = handle != nil ? .zero : CMTime(value: 1, timescale: Int32(mode.fps))
-            // Five reusable NV12 surfaces absorb short encoder stalls without a
-            // growing app queue or an extra BGRA-to-YUV conversion in VideoToolbox.
             configuration.queueDepth = 5; configuration.showsCursor = true
-            configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            // Use the conservative capture format; hardware AVC performs conversion.
+            configuration.pixelFormat = kCVPixelFormatType_32BGRA
             configuration.capturesAudio = audio
             configuration.sampleRate = 48000; configuration.channelCount = 2
             configuration.excludesCurrentProcessAudio = true
             let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: configuration, delegate: output)
             capture = stream
-            try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "metz.stream.capture"))
-            if audio { try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: DispatchQueue(label: "metz.stream.audio")) }
+            try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "metz.stream.capture", qos: .userInteractive))
+            if audio { try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: DispatchQueue(label: "metz.stream.audio", qos: .userInitiated)) }
             try await stream.startCapture()
             try Task.checkCancellation()
             guard token == current else { throw CancellationError() }
             status = "Второй экран подключён · \(mode.title) · звук \(audio ? "включён" : "выключен")"
-            previousSample = (ProcessInfo.processInfo.systemUptime, encoder.capturedCount, encoder.counts.0)
+            previousSample = (ProcessInfo.processInfo.systemUptime, encoder.capturedCount, encoder.counts.0, encoder.processing.bytes)
             monitor = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self, let pipeline = self.pipeline else { return }
                     let count = pipeline.counts
+                    let processing = pipeline.processing
+                    var encodedMbps: Double?
                     let now = ProcessInfo.processInfo.systemUptime, captured = pipeline.capturedCount
                     if let previous = self.previousSample, now > previous.time {
                         self.capturedFPS = Double(captured - previous.captured) / (now - previous.time)
                         self.admittedFPS = Double(count.0 - previous.admitted) / (now - previous.time)
+                        encodedMbps = Double(processing.bytes - previous.bytes) * 8 / (now - previous.time) / 1_000_000
                     }
-                    self.previousSample = (now, captured, count.0)
+                    self.previousSample = (now, captured, count.0, processing.bytes)
                     func fps(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "нет данных" }
                     self.statistics = "Кадры/с · захват Mac: \(fps(self.capturedFPS)) · приём декодера: \(fps(self.admittedFPS)) · выход декодера: \(fps(self.outputFPS)) · Surface ТВ: \(fps(self.renderedFPS))\nПринято: \(count.0) кадров · пропущено до передачи: \(count.1)"
-                    let processing = pipeline.processing
                     let frames = self.output?.frameCounts ?? (complete: 0, idle: 0, other: 0)
-                    self.processingStatistics = "Кодирование, p95: \(fps(processing.encoder.p95MS)) мс · подтверждение ТВ, p95: \(fps(processing.admission.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(processing.frames)"
+                    self.processingStatistics = "Видеопоток, кодирование: \(fps(encodedMbps)) Мбит/с\nКодирование, p95: \(fps(processing.encoder.p95MS)) мс · подтверждение ТВ, p95: \(fps(processing.admission.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(processing.frames)"
                 }
             }
             startTask = nil
@@ -375,6 +391,7 @@ final class ConnectionManager: ObservableObject {
             }
         }
         captureDisplayID = 0
+        if let activity = streamActivity { ProcessInfo.processInfo.endActivity(activity); streamActivity = nil }
         active = false; decodedOnTV = false; statistics = ""; processingStatistics = ""; status = reason
         capturedFPS = nil; admittedFPS = nil; outputFPS = nil; renderedFPS = nil
     }
@@ -391,13 +408,27 @@ final class ConnectionManager: ObservableObject {
                 height: Int(config["height"] ?? "768") ?? 768, fps: Int(config["fps"] ?? "60") ?? 60)
             guard requested.valid else { throw StreamError.invalid }
             let withAudio = config["audio"] == "true"
+            // Explicit runtime checks only; bound their duration and report size.
+            let cycles = min(4, max(1, Int(config["cycles"] ?? "2") ?? 2))
+            let measureSeconds = min(60, max(5, Int(config["measure_seconds"] ?? (withAudio ? "15" : "8")) ?? 8))
+            // Let the newly launched benchmark UI settle before changing display topology.
+            // This delay belongs to explicit checks, never to normal user sessions.
+            try await Task.sleep(nanoseconds: 8_000_000_000)
             var runs: [[String: Any]] = []
-            for cycle in 1...2 {
+            func checkpoint(_ data: [String: Any]) {
+                guard let bytes = try? JSONSerialization.data(withJSONObject: data, options: [.sortedKeys]) else { return }
+                _ = FileManager.default.createFile(atPath: configuration.deletingLastPathComponent()
+                    .appendingPathComponent("runtime-progress.json").path, contents: bytes, attributes: [.posixPermissions: 0o600])
+            }
+            for cycle in 1...cycles {
                 if let prepare {
                     let error: String? = await withCheckedContinuation { continuation in
                         prepare(identity.fingerprint) { continuation.resume(returning: $0) }
                     }
-                    if let error { showReadinessError(error); throw StreamError.unavailable }
+                    if let error {
+                        checkpoint(["runs": runs, "cycle": cycle, "failure": error])
+                        showReadinessError(error); throw StreamError.unavailable
+                    }
                 }
                 start(host: host, pin: pin, identity: identity, mode: requested, audio: withAudio)
                 for _ in 0..<200 {
@@ -416,25 +447,48 @@ final class ConnectionManager: ObservableObject {
                 // ARC owns both local and stored references across await stop().
                 // close() must not release that object behind those references.
                 window.isReleasedWhenClosed = false
-                window.title = "METZ · проверка 60 FPS"
+                window.title = "METZ · проверка \(requested.fps) FPS"
                 let view = RuntimeMotionView()
+                view.wantsLayer = true
                 window.contentView = view
                 window.orderFrontRegardless(); testWindow = window
                 window.setFrameOrigin(NSPoint(x: screen.frame.minX + 40, y: screen.frame.minY + 40))
+                view.startMotion()
                 let motion = screen.displayLink(target: view, selector: #selector(RuntimeMotionView.advance(_:)))
-                motion.preferredFrameRateRange = CAFrameRateRange(minimum: Float(requested.fps), maximum: Float(requested.fps), preferred: Float(requested.fps))
+                let stimulusFPS = 60
+                motion.preferredFrameRateRange = CAFrameRateRange(minimum: Float(stimulusFPS), maximum: Float(stimulusFPS), preferred: Float(stimulusFPS))
                 motion.add(to: .main, forMode: .common)
                 try await Task.sleep(nanoseconds: 3_000_000_000)
                 let initialCount = pipeline?.counts.0 ?? 0, initialCaptured = pipeline?.capturedCount ?? 0
                 let initialTV = previousReport
                 let initialTicks = view.tick
                 let began = ProcessInfo.processInfo.systemUptime
+                var sampledAt = began, sampledCapture = initialCaptured, sampledAdmission = initialCount
+                var sampledTick = initialTicks, sampledBytes = pipeline?.processing.bytes ?? 0
+                var sampledCodec = pipeline?.processing.frames ?? 0
+                var sampledIdle = output?.frameCounts.idle ?? 0
                 var samples: [[String: Any]] = []
-                for _ in 0..<(withAudio ? 15 : 8) {
+                for _ in 0..<measureSeconds {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                     guard active else { break }
-                    samples.append(["capture_fps": capturedFPS ?? -1, "admission_fps": admittedFPS ?? -1,
+                    let now = ProcessInfo.processInfo.systemUptime, elapsed = now - sampledAt
+                    let capture = pipeline?.capturedCount ?? 0, admission = pipeline?.counts.0 ?? 0
+                    let processing = pipeline?.processing, idle = output?.frameCounts.idle ?? 0
+                    samples.append(["elapsed": now - began,
+                        "capture_fps": Double(capture - sampledCapture) / elapsed,
+                        "admission_fps": Double(admission - sampledAdmission) / elapsed,
+                        "stimulus_fps": Double(view.tick - sampledTick) / elapsed,
+                        "codec_fps": Double((processing?.frames ?? 0) - sampledCodec) / elapsed,
+                        "encoded_video_mbps": Double((processing?.bytes ?? 0) - sampledBytes) * 8 / elapsed / 1_000_000,
+                        "capture_idle": idle - sampledIdle,
+                        "raw_queue_p95_ms": processing?.rawQueue.p95MS ?? -1,
+                        "encoder_p95_ms": processing?.encoder.p95MS ?? -1,
+                        "admission_p95_ms": processing?.admission.p95MS ?? -1,
                         "decoder_output_fps": outputFPS ?? -1, "surface_fps": renderedFPS ?? -1])
+                    sampledAt = now; sampledCapture = capture; sampledAdmission = admission
+                    sampledTick = view.tick; sampledBytes = processing?.bytes ?? 0
+                    sampledCodec = processing?.frames ?? 0; sampledIdle = idle
+                    checkpoint(["runs": runs, "cycle": cycle, "target_fps": requested.fps, "samples": samples])
                 }
                 let seconds = ProcessInfo.processInfo.systemUptime - began
                 let finalCount = pipeline?.counts ?? (0, 0), finalCaptured = pipeline?.capturedCount ?? 0
@@ -452,6 +506,10 @@ final class ConnectionManager: ObservableObject {
                 run["test_window_on_owned_display"] = (window.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32) == id
                 run["audio_packets_submitted"] = pipeline?.audioPacketCount ?? 0
                 run["stimulus_fps"] = Double(view.tick - initialTicks) / seconds
+                run["frame_capacity"] = transport?.frameCapacity ?? 2
+                run["source_refresh_fps"] = 60
+                run["quartz_refresh_fps"] = CGDisplayCopyDisplayMode(id)?.refreshRate
+                run["manager_foreground"] = NSApp.isActive
                 run["active_before_stop"] = active
                 run["capture_complete"] = captureCounts?.complete
                 run["capture_idle"] = captureCounts?.idle
@@ -477,11 +535,12 @@ final class ConnectionManager: ObservableObject {
                 await stop()
                 run["display_removed"] = DisplayTopology.contains(id) == false
                 run["active_after_stop"] = active
-                run["session_resources_released"] = capture == nil && pipeline == nil && output == nil && transport == nil && handle == nil && monitor == nil && startTask == nil
+                run["session_resources_released"] = capture == nil && pipeline == nil && output == nil && transport == nil && handle == nil && monitor == nil && startTask == nil && streamActivity == nil
                 runs.append(run)
+                checkpoint(["runs": runs, "cycle": cycle, "stopped": true])
                 try await Task.sleep(nanoseconds: 1_000_000_000)
             }
-            let report: [String: Any] = ["runs": runs, "capture_scope": "owned virtual display with generated moving bar", "stimulus": "AppKit display link", "audio": withAudio]
+            let report: [String: Any] = ["runs": runs, "capture_scope": "owned virtual display with generated moving bar", "stimulus": "Core Animation moving layer; display link counts clock callbacks only", "audio": withAudio]
             let destination = configuration.deletingLastPathComponent().appendingPathComponent("runtime-report-\(UUID().uuidString).json")
             let saved = FileManager.default.createFile(atPath: destination.path,
                 contents: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted]), attributes: [.posixPermissions: 0o600])

@@ -155,7 +155,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             }
             if (receiver?.isRunning == true && receiver?.trusts(it) == true) return
             // A new identity invalidates the active listener, but trust still requires local confirmation.
-            sessionID++; receiver?.stop(); receiver = null; activeReceiver = null
+            sessionID++; stopReceiver()
             panel.visibility = View.VISIBLE; start.isEnabled = identityReady
             pin.setText(it)
             if (start.isEnabled) focusConfirmation() else pin.requestFocus()
@@ -168,10 +168,10 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
         start.isEnabled = identityReady
         startPendingSession()
     }
-    override fun onStop() { shown = false; confirmationDialog?.dismiss(); sessionID++; receiver?.stop(); receiver = null; activeReceiver = null; super.onStop() }
+    override fun onStop() { shown = false; confirmationDialog?.dismiss(); sessionID++; stopReceiver(); super.onStop() }
     override fun surfaceCreated(holder: SurfaceHolder) { startPendingSession() }
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
-    override fun surfaceDestroyed(holder: SurfaceHolder) { sessionID++; receiver?.stop(); receiver = null; activeReceiver = null; panel.visibility = View.VISIBLE; start.isEnabled = identityReady }
+    override fun surfaceDestroyed(holder: SurfaceHolder) { sessionID++; stopReceiver(); panel.visibility = View.VISIBLE; start.isEnabled = identityReady }
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
         if (keyCode == android.view.KeyEvent.KEYCODE_MENU && receiver?.isRunning == true) {
             receiver?.requestKeyframe(); return true
@@ -181,7 +181,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     @Deprecated("Platform callback for Android11")
     override fun onBackPressed() {
         if (autoSession) { finish() }
-        else if (receiver != null) { sessionID++; receiver?.stop(); receiver = null; activeReceiver = null; panel.visibility = View.VISIBLE; start.isEnabled = identityReady; start.requestFocus() }
+        else if (receiver != null) { sessionID++; stopReceiver(); panel.visibility = View.VISIBLE; start.isEnabled = identityReady; start.requestFocus() }
         else super.onBackPressed()
     }
     private fun focusConfirmation() {
@@ -200,11 +200,18 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
         pendingTrustedPeer = null
         if (trust.getString("peerPin", "").equals(peer, ignoreCase = true)) beginReceiver(peer, automatic = true)
     }
+    private fun stopReceiver() {
+        val retiring = receiver
+        receiver = null
+        retiring?.stop()
+        // A retiring Activity must not clear a newer Activity's published receiver.
+        if (activeReceiver === retiring) activeReceiver = null
+    }
     private fun beginReceiver(peer: String, automatic: Boolean) {
         if (!shown || !identityReady || !surface.holder.surface.isValid) { status.text = "Экран ещё не готов"; return }
         // A new explicit start retires the previous session even with the same peer.
         // The receiver serializes listener/codec teardown before allocating the next.
-        receiver?.stop(); val current = ++sessionID; autoSession = automatic
+        stopReceiver(); val current = ++sessionID; autoSession = automatic
         receiver = StreamReceiver(surface.holder.surface, peer,
             status = { message -> runOnUiThread {
                 if (!shown || current != sessionID) return@runOnUiThread

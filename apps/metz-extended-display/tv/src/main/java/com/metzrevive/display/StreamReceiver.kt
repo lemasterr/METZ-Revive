@@ -37,7 +37,10 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
     private var audio: StreamAudio? = null
     private val audioLock = Any()
     private var network: Thread? = null
-    private var decoding: Thread? = null
+    private var decoding: android.os.HandlerThread? = null
+    @Volatile private var decodeHandler: android.os.Handler? = null
+    private val decoderClosing = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val inputBuffers = java.util.ArrayDeque<Int>()
     private val receiptLock = Any()
     private var packetStage = 1
     private val keyframePending = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -61,8 +64,12 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
                 retiringDecoder?.let { check(!it.isAlive) { "Previous decoder still retiring" } }
                 retiringDecoder = null
                 if (!active) return@synchronized
-                val listener = (StreamIdentity.context(pin).serverSocketFactory.createServerSocket(47421) as SSLServerSocket)
+                val listener = (StreamIdentity.context(pin).serverSocketFactory.createServerSocket() as SSLServerSocket)
                 server = listener
+                // The retiring session closes its accepted socket under sessionLock.
+                // Rebind even while TCP retains that closed connection in TIME_WAIT.
+                listener.reuseAddress = true
+                listener.bind(java.net.InetSocketAddress(47421))
                 listener.enabledProtocols = listener.supportedProtocols.filter { it == "TLSv1.2" || it == "TLSv1.3" }.toTypedArray()
                 listener.needClientAuth = true
                 listener.soTimeout = 1000
@@ -91,7 +98,7 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
                     receive(DataInputStream(accepted.inputStream))
                     break
                 }
-            } catch (_: java.net.BindException) { completion = "Приёмник уже занят. Остановите прошлое подключение и повторите." }
+            } catch (_: java.net.BindException) { recordFailure("LISTENER_BIND"); completion = "Приёмник уже занят. Остановите прошлое подключение и повторите." }
             catch (_: StreamAudioFailure) {
                 recordFailure("AUDIO_OUTPUT")
                 runCatching { receipt(0xE3) }
@@ -162,6 +169,7 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
                     // A short decoder stall must not tear down the desktop. Wait
                     // with bounded memory; TCP then slows the sender without dropping P-frames.
                     if (!frames.offer(EncodedFrame(if (idr) parameterSets + payload else payload, header.pts))) throw FrameBackpressureTimeout()
+                    decodeHandler?.post { feedDecoder() }
                     lastPTS = header.pts
                 }
                 3 -> { packetStage = 6; require(header.length == 0 && header.flags == 0); receipt(0x41) }
@@ -196,6 +204,10 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
         val format = MediaFormat.createVideoFormat("video/avc", mode.width, mode.height).apply {
             setByteBuffer("csd-0", ByteBuffer.wrap(sps)); setByteBuffer("csd-1", ByteBuffer.wrap(pps))
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, StreamProtocol.MAX_PAYLOAD + 8192)
+            // Declare real-time demand to the codec resource planner; no manual clock changes.
+            setInteger(MediaFormat.KEY_PRIORITY, 0)
+            setInteger(MediaFormat.KEY_FRAME_RATE, mode.fps)
+            setFloat(MediaFormat.KEY_OPERATING_RATE, mode.fps.toFloat())
             if (info.getCapabilitiesForType("video/avc").isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency))
                 setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
@@ -204,75 +216,77 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
             synchronized(audioLock) { if (active) audio = sink else { sink.close(); error("Session stopped") } }
         }
         val decoder = MediaCodec.createByCodecName(info.name)
-        try {
-            decoder.configure(format, surface, null, 0)
-            decoder.setOnFrameRenderedListener({ _, pts, nanoTime ->
-                if (active) telemetry.rendered(pts, nanoTime)
-            }, renderHandler)
-            decoder.start()
-        }
-        catch (e: Exception) { decoder.release(); throw e }
-        codec = decoder
-        decoding = Thread({
-            val output = MediaCodec.BufferInfo()
+        val thread = android.os.HandlerThread("metz-decoder", android.os.Process.THREAD_PRIORITY_DISPLAY).apply { start() }
+        decoding = thread
+        val handler = android.os.Handler(thread.looper)
+        decodeHandler = handler
+        val configured = java.util.concurrent.CountDownLatch(1)
+        var failure: Exception? = null
+        handler.post {
             try {
-                while (active) {
-                    val frame = frames.poll()
-                    if (frame != null) {
-                        val deadline = System.nanoTime() + 2_000_000_000
-                        var index = -1
-                        while (active && index < 0 && System.nanoTime() < deadline) {
-                            index = decoder.dequeueInputBuffer(10_000)
-                            drain(decoder, output)
-                        }
-                        if (!active) break
-                        require(index >= 0)
-                        val buffer = requireNotNull(decoder.getInputBuffer(index)); buffer.clear()
-                        require(buffer.remaining() >= frame.bytes.size)
-                        buffer.put(frame.bytes)
-                        decoder.queueInputBuffer(index, 0, frame.bytes.size, frame.pts, 0)
-                        // Credit immediately after admission. Draining output before
-                        // ACK needlessly serialized encoding, network and output latency.
-                        // Credit only after admission to MediaCodec, not TCP delivery.
-                        // This allows hardware output latency without growing the raw queue.
-                        synchronized(receiptLock) {
-                            socket?.outputStream?.write(StreamProtocol.admissionReceipt(frame.pts))
-                        }
+                check(active)
+                codec = decoder
+                decoder.setCallback(object : MediaCodec.Callback() {
+                    override fun onInputBufferAvailable(owner: MediaCodec, index: Int) {
+                        if (!active || codec !== owner) return
+                        try { inputBuffers.addLast(index); feedDecoder() }
+                        catch (error: Exception) { decoderFailed(error) }
                     }
-                    drain(decoder, output)
-                }
+                    override fun onOutputBufferAvailable(owner: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                        if (!active || codec !== owner) return
+                        try {
+                            telemetry.output()
+                            owner.releaseOutputBuffer(index, true)
+                            if (firstFrame) {
+                                firstFrame = false; receipt(0x50)
+                                android.util.Log.i("METZStream", "FIRST_FRAME_DECODED")
+                            }
+                            reportFrames()
+                        } catch (error: Exception) { decoderFailed(error) }
+                    }
+                    override fun onOutputFormatChanged(owner: MediaCodec, format: MediaFormat) = Unit
+                    override fun onError(owner: MediaCodec, error: MediaCodec.CodecException) {
+                        if (active && codec === owner) decoderFailed(error)
+                    }
+                }, handler)
+                decoder.configure(format, surface, null, 0)
+                decoder.setOnFrameRenderedListener({ _, pts, nanoTime ->
+                    if (active) telemetry.rendered(pts, nanoTime)
+                }, renderHandler)
+                decoder.start()
             } catch (error: Exception) {
-                if (active) {
-                    val code = if (error is MediaCodec.CodecException) "DECODER_CODEC" else "DECODER_BUFFER_OR_STATE"
-                    recordFailure(code)
-                    runCatching { receipt(0xE2) }
-                    stop(); status("Декодер остановлен ($code). Повторите подключение.")
-                }
-            } finally {
-                runCatching { decoder.setOnFrameRenderedListener(null, null) }
-                runCatching { decoder.stop() }; runCatching { decoder.release() }; codec = null
-            }
-        }, "metz-decoder").apply { start() }
+                failure = error; codec = null
+                decoderClosing.set(true)
+                runCatching { decoder.release() }
+                decodeHandler = null; thread.quitSafely()
+            } finally { configured.countDown() }
+        }
+        check(configured.await(5, java.util.concurrent.TimeUnit.SECONDS)) { "Decoder setup timed out" }
+        failure?.let { throw it }
         return parameterSets
     }
     private var firstFrame = true
-    private fun drain(decoder: MediaCodec, info: MediaCodec.BufferInfo) {
-        repeat(4) {
-            val index = decoder.dequeueOutputBuffer(info, 0)
-            if (index >= 0) {
-                telemetry.output()
-                decoder.releaseOutputBuffer(index, true)
-                if (firstFrame) {
-                    firstFrame = false
-                    receipt(0x50)
-                    android.util.Log.i("METZStream", "FIRST_FRAME_DECODED")
-                }
+    // Both available-buffer callbacks and arrival notifications run on the same codec handler.
+    // An empty queue sleeps until an event; there is no timed polling of input/output buffers.
+    private fun feedDecoder() {
+        try {
+            val decoder = codec ?: return
+            while (active && inputBuffers.isNotEmpty()) {
+                val frame = frames.poll(0) ?: break
+                val index = inputBuffers.removeFirst()
+                val buffer = requireNotNull(decoder.getInputBuffer(index)); buffer.clear()
+                require(buffer.remaining() >= frame.bytes.size)
+                buffer.put(frame.bytes)
+                decoder.queueInputBuffer(index, 0, frame.bytes.size, frame.pts, 0)
+                synchronized(receiptLock) { socket?.outputStream?.write(StreamProtocol.admissionReceipt(frame.pts)) }
             }
-            else if (index == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                reportFrames(); return
-            }
-        }
-        reportFrames()
+        } catch (error: Exception) { decoderFailed(error) }
+    }
+    private fun decoderFailed(error: Exception) {
+        if (!active) return
+        val code = if (error is MediaCodec.CodecException) "DECODER_CODEC" else "DECODER_BUFFER_OR_STATE"
+        recordFailure(code); runCatching { receipt(0xE2) }
+        stop(); status("Декодер остановлен ($code). Повторите подключение.")
     }
     private fun reportFrames() {
         val now = System.nanoTime()
@@ -294,6 +308,16 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
         runCatching { server?.close() }; server = null
         frames.clear()
         synchronized(audioLock) { audio?.close(); audio = null }
-        decoding?.interrupt()
+        val handler = decodeHandler
+        if (handler != null && decoderClosing.compareAndSet(false, true)) handler.post {
+            val decoder = codec; codec = null
+            inputBuffers.clear()
+            if (decoder != null) {
+                runCatching { decoder.setOnFrameRenderedListener(null, null) }
+                runCatching { decoder.stop() }; runCatching { decoder.release() }
+            }
+            decodeHandler = null
+            decoding?.quitSafely()
+        }
     }
 }

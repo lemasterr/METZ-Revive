@@ -36,6 +36,22 @@ struct WriteDeadlineGate {
     func expired(_ id: UInt64) -> Bool { pending == id }
 }
 
+/// Select fresh source frames on an absolute timeline, without accumulating callback jitter.
+struct FrameRateSelector {
+    private var next: Double?
+    private var previous: Double?
+    mutating func accepts(_ time: Double, fps: Int) -> Bool {
+        guard time.isFinite, fps > 0, previous.map({ time > $0 }) ?? true else { return false }
+        previous = time
+        let interval = 1 / Double(fps)
+        guard let deadline = next else { next = time + interval; return true }
+        guard time + 0.0005 >= deadline else { return false }
+        // Skip elapsed deadlines after a stall; never replay or burst old frames.
+        next = deadline + max(1, floor((time + 0.0005 - deadline) / interval) + 1) * interval
+        return true
+    }
+}
+
 /// A bounded window of actual intervals; absent samples never become zero.
 struct FrameCadence {
     private var previous: Double?
@@ -107,6 +123,39 @@ struct FrameDeliveryGate {
         return true
     }
     var complete: Bool { written && admitted }
+}
+
+enum FrameDeliveryProgress { case invalid, waiting, complete }
+
+/// Ordered, bounded decoder credit. ACK RTT must not become a one-frame FPS limit.
+struct FrameDeliveryWindow {
+    let capacity: Int
+    private var frames: [FrameDeliveryGate] = []
+    private var lastSubmitted: UInt64?
+    init(capacity: Int = 2) { precondition((1...2).contains(capacity)); self.capacity = capacity }
+    var isEmpty: Bool { frames.isEmpty }
+    func contains(_ pts: UInt64) -> Bool { frames.contains { $0.pts == pts } }
+    func written(_ pts: UInt64) -> Bool { frames.first { $0.pts == pts }?.written == true }
+    mutating func reserve(_ pts: UInt64) -> Bool {
+        guard frames.count < capacity, lastSubmitted.map({ pts > $0 }) ?? true else { return false }
+        frames.append(FrameDeliveryGate(pts: pts)); lastSubmitted = pts
+        return true
+    }
+    mutating func markWritten(_ pts: UInt64) -> FrameDeliveryProgress {
+        guard let index = frames.firstIndex(where: { $0.pts == pts }), !frames[index].written else { return .invalid }
+        frames[index].markWritten()
+        return finish(index)
+    }
+    mutating func acknowledge(_ pts: UInt64) -> FrameDeliveryProgress {
+        guard let index = frames.firstIndex(where: { !$0.admitted }), frames[index].pts == pts,
+              frames[index].acknowledge(pts: pts) else { return .invalid }
+        return finish(index)
+    }
+    private mutating func finish(_ index: Int) -> FrameDeliveryProgress {
+        guard frames[index].complete else { return .waiting }
+        frames.remove(at: index)
+        return .complete
+    }
 }
 
 enum Wire {
