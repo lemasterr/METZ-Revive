@@ -8,7 +8,7 @@ data class VideoSessionParameters(val width: Int, val height: Int, val fps: Int,
 class VideoSessionGate {
     private var current: VideoSessionParameters? = null
     fun accept(value: VideoSessionParameters): Boolean {
-        if (value.epoch !in 1..0xffffffffL || value.fps !in listOf(30, 60) ||
+        if (value.epoch !in 1..0xffffffffL || value.fps !in listOf(30, 50, 60) ||
             (value.width to value.height) !in listOf(854 to 480, 960 to 540, 1280 to 720, 1366 to 768)) return false
         if (current != null && current != value) return false
         current = value

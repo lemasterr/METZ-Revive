@@ -77,7 +77,7 @@ struct MeasurementHistoryView: View {
                 Text("Доставка — подтверждение получения команды; это не время отображения результата на ТВ.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-        }.padding(.horizontal, 28).padding(.bottom, 12)
+        }.padding(.bottom, 12)
     }
 }
 
@@ -90,13 +90,21 @@ struct ManagerMetricsView: View {
                 Spacer()
                 Button("Обновить данные", action: model.refreshMetrics).disabled(model.selectedDevice?.available != true || model.busy)
             }
-            LabeledContent("CPU", value: model.metrics?.cpuPercent.map { String(format: "%.0f %%", $0) } ?? "Нет данных")
-            LabeledContent("RAM · занято / доступно", value: memory)
-            LabeledContent("Хранилище · свободно", value: model.metrics?.storageAvailableKiB.map { "\($0 / 1024) МиБ" } ?? "Нет данных")
+            HStack(alignment: .top, spacing: 24) {
+            metric("CPU", model.metrics?.cpuPercent.map { String(format: "%.0f %%", $0) } ?? "Нет данных")
+            metric("RAM · занято / доступно", memory)
+            metric("Хранилище · свободно", model.metrics?.storageAvailableKiB.map { "\($0 / 1024) МиБ" } ?? "Нет данных")
+            }
             if let date = model.metrics?.measuredAt {
                 Text("Данные ТВ · \(date.formatted(date: .numeric, time: .standard))").font(.caption).foregroundStyle(.secondary)
             }
         }.monospacedDigit()
+    }
+    private func metric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.caption).foregroundStyle(MetzStyle.secondary)
+            Text(value).font(.system(size: 22, weight: .medium)).lineLimit(1).minimumScaleFactor(0.7)
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private var memory: String {
         guard let used = model.metrics?.usedKiB, let available = model.metrics?.availableKiB else { return "Нет данных" }

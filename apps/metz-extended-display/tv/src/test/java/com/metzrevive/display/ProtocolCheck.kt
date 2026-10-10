@@ -10,6 +10,8 @@ fun main() {
     check(metrics.get().toInt() == 0x54 && metrics.long == 2L && metrics.long == 2L && metrics.long == 1_000_000L)
     val session = VideoSessionGate()
     val motion = VideoSessionParameters(1366, 768, 60, 7, false)
+    check(VideoSessionGate().accept(motion.copy(fps = 50)))
+    check(!VideoSessionGate().accept(motion.copy(fps = 51)))
     check(session.accept(motion))
     // Changing SPS/PPS on a keyframe keeps the same session rather than allocating a second decoder.
     check(session.accept(motion.copy()))
@@ -64,6 +66,8 @@ fun main() {
         .putInt(0x4d545a31).put(1.toByte()).put(type.toByte()).putShort(1.toShort())
         .putInt(length).putInt(epoch).putLong(pts).array()
     check(StreamProtocol.header(header()).epoch == 7L)
+    check(StreamMode(1366, 768, 50).level == "4.1")
+    check(StreamMode(1280, 720, 50).level == "4.1")
     check(StreamMode(1366, 768, 60).level == "4.2")
     check(StreamMode(960, 540, 60).level == "4.1")
     check(StreamMode(1920, 1080, 60) !in StreamMode.candidates)

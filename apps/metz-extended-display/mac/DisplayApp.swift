@@ -47,17 +47,36 @@ struct DisplayView: View {
     @State private var selectedDisplay: UInt32 = 0
     @State private var confirmedVirtual = false
     @State private var externalDisplays: [(id: UInt32, name: String)] = []
+    @State private var showingFailure = false
     private let background = Color(red: 11/255, green: 18/255, blue: 32/255)
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 24) {
             MetzPageTitle(title: "Экран")
-            connectionSetup
+            HStack(alignment: .top, spacing: 32) {
+                connectionSetup.frame(maxWidth: .infinity, alignment: .leading)
+                Rectangle().fill(MetzStyle.line).frame(width: 1)
+                VStack(alignment: .leading, spacing: 16) {
+                    Label(manager.active ? "Трансляция" : "Подключение", systemImage: manager.active ? "dot.radiowaves.left.and.right" : "display")
+                        .font(.headline).foregroundStyle(MetzStyle.secondary)
+                    Text(manager.status).font(.title3).fontWeight(.medium).textSelection(.enabled)
+                    if manager.active {
+                        Text(manager.configuredMode.title).font(.callout).foregroundStyle(MetzStyle.secondary)
+                        if !manager.statistics.isEmpty { Text(manager.statistics).font(.callout).monospacedDigit().textSelection(.enabled) }
+                    }
+                    if !manager.lastFailure.isEmpty {
+                        Button { showingFailure = true } label: {
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle")
+                                Text("Последняя ошибка…")
+                                Spacer()
+                                Image(systemName: "arrow.up.right")
+                            }.frame(maxWidth: .infinity).contentShape(Rectangle())
+                        }.help("Полный текст последней ошибки")
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.fixedSize(horizontal: false, vertical: true)
             Divider()
-            Text(manager.status).font(.headline)
-            if !manager.active, !manager.lastFailure.isEmpty {
-                DisclosureGroup("Последняя ошибка") { Text(manager.lastFailure).font(.callout).textSelection(.enabled).padding(.top, 8) }
-            }
             HStack(spacing: 12) {
                 Button(pairing ? "Подключение…" : "Начать трансляцию") {
                     if let verifyTV, let identity {
@@ -77,6 +96,7 @@ struct DisplayView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(manager.active ? "Задано: " + manager.configuredMode.title : "Нет активной трансляции").font(.callout)
                     if manager.active && !manager.statistics.isEmpty { Text(manager.statistics).font(.callout).monospacedDigit().textSelection(.enabled) }
+                    if manager.active && !manager.processingStatistics.isEmpty { Text(manager.processingStatistics).font(.caption).monospacedDigit().textSelection(.enabled) }
                     Text("Приём в декодер и вывод на Surface — разные замеры. Частота захвата снижается, когда изображение не меняется.").font(.caption).foregroundStyle(.secondary)
                     connectionDetails
                     Button("Доступ к записи экрана…") {
@@ -87,6 +107,16 @@ struct DisplayView: View {
         }.padding(MetzStyle.pagePadding).frame(maxWidth: .infinity, alignment: .leading)
         }.background(MetzStyle.background).tint(MetzStyle.accent).preferredColorScheme(.dark)
         .buttonStyle(MetzButtonStyle())
+        .sheet(isPresented: $showingFailure) {
+            VStack(alignment: .leading, spacing: 20) {
+                HStack { Text("Ошибка трансляции").font(.title2).bold(); Spacer(); Button("Закрыть") { showingFailure = false } }
+                ScrollView { Text(manager.lastFailure).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                Button("Скопировать ошибку") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(manager.lastFailure, forType: .string)
+                }
+            }.padding(24).frame(width: 560, height: 300)
+        }
         .onChange(of: selectedDisplay) { confirmedVirtual = false }
         .onChange(of: mode) { selectedDisplay = 0; confirmedVirtual = false }
         .onChange(of: serial) { oldValue, value in if !manager.active {
@@ -155,7 +185,7 @@ struct DisplayView: View {
     }
     private var connectionSetup: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Передача изображения").font(.headline)
+            Text("Источник и качество").font(.headline)
             Picker("Экран Mac", selection: $selectedDisplay) {
                 Text("Создать виртуальный экран").tag(UInt32(0))
                 ForEach(externalDisplays, id: \.id) { display in Text(display.name).tag(display.id) }
@@ -170,13 +200,11 @@ struct DisplayView: View {
             }
             if loadModes != nil {
                 HStack {
-                    Button(pairing ? "Проверка…" : "Проверить режимы ТВ", action: refreshModes).disabled(serial == nil)
-                    Text(modesStatus).font(.caption).foregroundStyle(.secondary)
+                    Button(pairing ? "Проверка…" : "Режимы ТВ", action: refreshModes).disabled(serial == nil).help(modesStatus)
+
                 }
             }
-            Toggle("Передавать системный звук Mac", isOn: $audio)
-            Text("Без микрофона. Частота — заданный верхний предел, фактический поток виден в технических данных.")
-                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Звук на ТВ", isOn: Binding(get: { manager.active ? manager.audio : audio }, set: { audio = $0 })).help("Системный звук Mac без микрофона; настройки применяются к следующему сеансу")
             if let identity, let prepareTV {
                 Button(pairing ? "Подготовка…" : "Подготовить ТВ") {
                     pairing = true

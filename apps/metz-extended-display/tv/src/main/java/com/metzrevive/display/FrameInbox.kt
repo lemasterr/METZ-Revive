@@ -12,6 +12,6 @@ internal class FrameInbox {
     fun offer(frame: EncodedFrame, timeoutMillis: Long = 500): Boolean =
         frames.offer(frame, timeoutMillis, TimeUnit.MILLISECONDS)
 
-    fun poll(): EncodedFrame? = frames.poll(20, TimeUnit.MILLISECONDS)
+    fun poll(timeoutMillis: Long = 4): EncodedFrame? = frames.poll(timeoutMillis, TimeUnit.MILLISECONDS)
     fun clear() = frames.clear()
 }

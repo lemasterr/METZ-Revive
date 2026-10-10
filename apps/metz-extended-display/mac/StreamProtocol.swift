@@ -8,10 +8,10 @@ struct StreamMode: Hashable, Codable, Identifiable {
     var title: String { "\(width)×\(height) · \(fps) кадров/с" }
     static let conservative = StreamMode(width: 1280, height: 720, fps: 30)
     static let candidates = [(854, 480), (960, 540), (1280, 720), (1366, 768)].flatMap { w, h in
-        [30, 60].map { StreamMode(width: w, height: h, fps: $0) }
+        [30, 50, 60].map { StreamMode(width: w, height: h, fps: $0) }
     }
     var valid: Bool { Self.candidates.contains(self) }
-    var level: String { width * height > 1280 * 720 && fps == 60 ? "4.2" : (width == 1366 || (fps == 60 && width >= 960) ? "4.1" : "3.1") }
+    var level: String { width * height > 1280 * 720 && fps == 60 ? "4.2" : (width == 1366 || (fps >= 50 && width >= 960) ? "4.1" : "3.1") }
     static func parse(_ data: Data) -> [StreamMode] {
         guard data.count <= 4096, let values = try? JSONDecoder().decode([StreamMode].self, from: data),
             values.count <= candidates.count, values.allSatisfy(\.valid) else { return [] }
@@ -20,6 +20,60 @@ struct StreamMode: Hashable, Codable, Identifiable {
 }
 
 enum StreamError: Error { case invalid, unavailable, overloaded, expired }
+
+/// A deadline belongs to one write, even if a later write is already pending.
+struct WriteDeadlineGate {
+    private var sequence: UInt64 = 0
+    private(set) var pending: UInt64?
+    mutating func begin() -> UInt64? {
+        guard pending == nil else { return nil }
+        sequence &+= 1; pending = sequence
+        return sequence
+    }
+    mutating func complete(_ id: UInt64) {
+        if pending == id { pending = nil }
+    }
+    func expired(_ id: UInt64) -> Bool { pending == id }
+}
+
+/// A bounded window of actual intervals; absent samples never become zero.
+struct FrameCadence {
+    private var previous: Double?
+    private var intervals: [Double] = []
+    private(set) var longGaps = 0
+    mutating func record(_ time: Double, expectedFPS: Int) {
+        guard time.isFinite, expectedFPS > 0 else { return }
+        guard let previous else { self.previous = time; return }
+        guard time > previous else { return }
+        self.previous = time
+        let ms = (time - previous) * 1000
+        if ms > 1500 / Double(expectedFPS) { longGaps += 1 }
+        intervals.append(ms)
+        if intervals.count > 120 { intervals.removeFirst() }
+    }
+    var p95MS: Double? {
+        guard !intervals.isEmpty else { return nil }
+        let sorted = intervals.sorted()
+        return sorted[min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1)]
+    }
+    var maximumMS: Double? { intervals.max() }
+}
+
+/// Processing time of recent completed operations, bounded to two seconds at 60 FPS.
+struct FrameLatency {
+    private var samples: [Double] = []
+    mutating func record(seconds: Double) {
+        guard seconds.isFinite, seconds >= 0 else { return }
+        samples.append(seconds * 1000)
+        if samples.count > 120 { samples.removeFirst() }
+    }
+    var p95MS: Double? {
+        guard !samples.isEmpty else { return nil }
+        let sorted = samples.sorted()
+        return sorted[min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1)]
+    }
+    var maximumMS: Double? { samples.max() }
+}
 
 struct TVFrameReport: Equatable {
     let output: UInt64

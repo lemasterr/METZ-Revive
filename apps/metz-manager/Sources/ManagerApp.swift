@@ -4,14 +4,22 @@ import SwiftUI
 @MainActor
 final class ManagerAppDelegate: NSObject, NSApplicationDelegate {
     static var operationActive = false
-    static weak var displayManager: ConnectionManager?
+    // Keep cleanup owners alive after SwiftUI removes the last window.
+    static var displayManager: ConnectionManager?
+    static var model: ManagerModel?
+    private var terminating = false
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if Self.operationActive { return .terminateCancel }
-        if let manager = Self.displayManager, manager.active {
-            Task { await manager.stop(); sender.reply(toApplicationShouldTerminate: true) }
-            return .terminateLater
+        guard !terminating else { return .terminateLater }
+        terminating = true
+        Task {
+            // Let an in-flight bounded ADB operation finish before releasing its server.
+            while Self.operationActive { try? await Task.sleep(for: .milliseconds(100)) }
+            await Self.model?.shutdownRemote()
+            await Self.displayManager?.stop()
+            sender.reply(toApplicationShouldTerminate: true)
         }
-        return .terminateNow
+        return .terminateLater
     }
     func applicationWillTerminate(_ notification: Notification) { OwnedADBServer.shared.stop() }
 }
@@ -21,6 +29,11 @@ final class ManagerModel: ObservableObject {
     private let remoteSession = RemoteSession()
     private var remoteTail: Task<Void, Never>?
     private var pendingKeys = 0
+    func shutdownRemote() async {
+        await remoteTail?.value
+        let session = remoteSession
+        await Task.detached { session.close() }.value
+    }
     @Published var fastRemote = true
     @Published var roundTripMS: Double?
     @Published var metrics: DeviceMetrics?
@@ -85,7 +98,8 @@ final class ManagerModel: ObservableObject {
     }
 
     func control(_ action: TVAction) {
-        guard fastRemote, action.keyCode != nil else {
+        // Power-off bypasses the Home bridge's intentionally narrow key whitelist.
+        guard fastRemote, action.keyCode != nil, action != .powerOff else {
             operate { controller, serial in try controller.send(action, serial: serial); return nil }
             return
         }
@@ -507,25 +521,45 @@ struct DiagnosticsView: View {
                 Button("Папка проекта…", action: model.chooseProject).disabled(model.busy)
             }
             ManagerMetricsView(model: model)
-            MeasurementHistoryView(model: model)
-            Form {
+            VStack(alignment: .leading, spacing: 12) {
                 Picker("Диагностика", selection: $model.profile) {
                     ForEach(DiagnosticProfile.allCases) { profile in
                         Text(profile.title).tag(profile)
                     }
                 }
-                .disabled(model.busy)
+                .pickerStyle(.segmented).disabled(model.busy)
             }
-            HStack {
+            HStack(spacing: 12) {
                 Button("Обновить устройства", action: model.refreshDevices).disabled(model.busy)
-                Button("Проверить сейчас", action: model.collect).disabled(!model.canCollect)
+                Button("Проверить сейчас", action: model.collect).buttonStyle(MetzButtonStyle(primary: true)).disabled(!model.canCollect)
                 if model.busy { ProgressView().controlSize(.small).accessibilityLabel("Сбор данных") }
             }
             Text(model.status).foregroundStyle(.secondary)
                 .accessibilityLabel("Статус: \(model.status)")
             Divider()
-            Text("История снимков").font(.headline)
+            HStack(alignment: .top, spacing: 28) {
+                snapshotResults.frame(maxWidth: .infinity, alignment: .leading)
+                Rectangle().fill(MetzStyle.line).frame(width: 1)
+                snapshotHistory.frame(width: 270, alignment: .leading)
+            }.fixedSize(horizontal: false, vertical: true)
+            Divider()
+            MeasurementHistoryView(model: model)
             HStack {
+                Text("Raw-снимки остаются в local/diagnostics").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if let snapshot = model.snapshot {
+                    Button("Показать снимок") { NSWorkspace.shared.activateFileViewerSelecting([snapshot]) }
+                }
+            }
+        }
+        .padding(MetzStyle.pagePadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+    private var snapshotHistory: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("История снимков").font(.headline)
+            VStack(alignment: .leading, spacing: 12) {
                 Picker("Снимок", selection: $model.selectedSnapshot) {
                     Text("Выберите снимок").tag(URL?.none)
                     ForEach(model.history) { entry in
@@ -538,6 +572,14 @@ struct DiagnosticsView: View {
                 Button("Открыть", action: model.openSnapshot).disabled(model.selectedSnapshot == nil || model.busy)
             }
             Text(model.historyStatus).font(.callout).foregroundStyle(.secondary)
+        }
+    }
+    private var snapshotResults: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if model.summary == nil {
+                Label("Пока нет снимка", systemImage: "waveform.path.ecg").font(.headline)
+                Text("Запустите проверку или откройте сохранённый снимок.").foregroundStyle(MetzStyle.secondary)
+            }
             if let summary = model.summary {
                 Divider()
                 Text(model.snapshot?.deletingPathExtension().lastPathComponent ?? "Снимок").font(.headline)
@@ -595,19 +637,9 @@ struct DiagnosticsView: View {
                 Text("Устройство и условия между снимками не подтверждены. Это различия показаний, а не замер улучшения. Счётчики могли сброситься после перезапуска.")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            Spacer(minLength: 0)
-            HStack {
-                Text("Raw-снимки остаются в local/diagnostics").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                if let snapshot = model.snapshot {
-                    Button("Показать снимок") { NSWorkspace.shared.activateFileViewerSelecting([snapshot]) }
-                }
-            }
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
+
 }
 
 

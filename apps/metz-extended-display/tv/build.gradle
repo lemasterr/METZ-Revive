@@ -31,8 +31,8 @@ android {
         applicationId 'com.metzrevive.display'
         minSdk 30
         targetSdk 35
-        versionCode 16
-        versionName '0.7.0'
+        versionCode 18
+        versionName '0.7.1'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8

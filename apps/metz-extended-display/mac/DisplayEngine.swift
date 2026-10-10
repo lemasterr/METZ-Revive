@@ -4,28 +4,39 @@ import CoreGraphics
 import ScreenCaptureKit
 import CoreMedia
 import AudioToolbox
+import QuartzCore
 
 @MainActor
 private final class RuntimeMotionView: NSView {
-    private var tick = 0
+    private(set) var tick = 0
     override func draw(_ dirtyRect: NSRect) {
         NSColor.black.setFill(); bounds.fill()
         NSColor.systemBlue.setFill()
         let offset = CGFloat(tick % 180) / 180 * max(0, bounds.width - 120)
         NSRect(x: offset, y: 0, width: 120, height: bounds.height).fill()
     }
-    func advance() { tick += 1; needsDisplay = true; displayIfNeeded() }
+    @objc func advance(_ link: CADisplayLink) { tick += 1; needsDisplay = true; displayIfNeeded() }
 }
 
 private final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     let pipeline: FramePipeline
+    private let lock = NSLock()
+    private var frameStates: [Int: Int] = [:]
+    var frameCounts: (complete: Int, idle: Int, other: Int) {
+        lock.lock(); defer { lock.unlock() }
+        let complete = frameStates[SCFrameStatus.complete.rawValue, default: 0]
+        let idle = frameStates[SCFrameStatus.idle.rawValue, default: 0]
+        return (complete, idle, frameStates.values.reduce(0, +) - complete - idle)
+    }
     var failure: ((String) -> Void)?
     init(pipeline: FramePipeline) { self.pipeline = pipeline }
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
         if type == .audio { submitAudio(sample); return }
         guard type == .screen, sample.isValid,
             let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-            let status = attachments.first?[.status] as? Int, status == SCFrameStatus.complete.rawValue,
+            let status = attachments.first?[.status] as? Int else { return }
+        lock.lock(); frameStates[status, default: 0] += 1; lock.unlock()
+        guard status == SCFrameStatus.complete.rawValue,
             let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
         pipeline.submit(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sample))
     }
@@ -48,13 +59,15 @@ private final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDele
         let buffers = UnsafeMutableAudioBufferListPointer(list)
         let planar = format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
         guard buffers.count == (planar ? 2 : 1), buffers.allSatisfy({ $0.mData != nil && Int($0.mDataByteSize) >= frames * (planar ? 4 : 8) }) else { return }
-        var pcm = Data(capacity: frames * 4)
-        for frame in 0..<frames { for channel in 0..<2 {
-            let value = buffers[planar ? channel : 0].mData!.assumingMemoryBound(to: Float.self)[planar ? frame : frame * 2 + channel]
-            let clamped = value.isFinite ? min(1, max(-1, value)) : 0
-            var encoded = Int16(clamped * 32767).littleEndian
-            withUnsafeBytes(of: &encoded) { pcm.append(contentsOf: $0) }
-        } }
+        var pcm = Data(count: frames * 4)
+        pcm.withUnsafeMutableBytes { storage in
+            let samples = storage.bindMemory(to: Int16.self)
+            for frame in 0..<frames { for channel in 0..<2 {
+                let value = buffers[planar ? channel : 0].mData!.assumingMemoryBound(to: Float.self)[planar ? frame : frame * 2 + channel]
+                let clamped = value.isFinite ? min(1, max(-1, value)) : 0
+                samples[frame * 2 + channel] = Int16(clamped * 32767).littleEndian
+            } }
+        }
         let pts = CMTimeConvertScale(CMSampleBufferGetPresentationTimeStamp(sample), timescale: 1_000_000, method: .roundTowardZero).value
         if pts >= 0 { pipeline.submitAudio(pcm, pts: UInt64(pts)) }
         withExtendedLifetime(block) {}
@@ -70,6 +83,7 @@ final class ConnectionManager: ObservableObject {
     @Published private(set) var status = "Готов к подключению"
     @Published private(set) var active = false
     @Published private(set) var statistics = ""
+    @Published private(set) var processingStatistics = ""
     @Published private(set) var decodedOnTV = false
     @Published private(set) var isStopping = false
     @Published private(set) var configuredMode = StreamMode.conservative
@@ -83,7 +97,7 @@ final class ConnectionManager: ObservableObject {
     private var lastDisplayID: CGDirectDisplayID = 0
     private var captureDisplayID: CGDirectDisplayID = 0
     private var mode = StreamMode.conservative
-    private var audio = false
+    @Published private(set) var audio = false
     private var testWindow: NSWindow?
     private var originalCursor: CGPoint?
     private var handle: UnsafeMutableRawPointer?
@@ -94,6 +108,7 @@ final class ConnectionManager: ObservableObject {
     private var startTask: Task<Void, Never>?
     private var token = UUID()
     private var stopping = false
+    private var stopWaiters: [CheckedContinuation<Void, Never>] = []
     private var monitor: Timer?
     private var sleepObserver: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
@@ -127,7 +142,7 @@ final class ConnectionManager: ObservableObject {
         guard !active, !stopping, mode.valid else { return }
         self.mode = mode; self.audio = audio
         configuredMode = mode
-        active = true; status = "Проверка доступа к экрану…"; statistics = ""; decodedOnTV = false
+        active = true; status = "Проверка доступа к экрану…"; statistics = ""; processingStatistics = ""; decodedOnTV = false
         capturedFPS = nil; admittedFPS = nil; outputFPS = nil; renderedFPS = nil
         previousReport = nil; previousSample = nil
         let current = UUID(); token = current
@@ -275,9 +290,14 @@ final class ConnectionManager: ObservableObject {
             stage = .capture
             let configuration = SCStreamConfiguration()
             configuration.width = mode.width; configuration.height = mode.height
-            configuration.minimumFrameInterval = CMTime(value: 1, timescale: Int32(mode.fps))
-            configuration.queueDepth = 3; configuration.showsCursor = true
-            configuration.pixelFormat = kCVPixelFormatType_32BGRA
+            // Our virtual display already runs at the selected rate. A second
+            // asynchronous throttle can skip updates near the same frame boundary.
+            // Existing displays retain a cap because their refresh rate may differ.
+            configuration.minimumFrameInterval = handle != nil ? .zero : CMTime(value: 1, timescale: Int32(mode.fps))
+            // Five reusable NV12 surfaces absorb short encoder stalls without a
+            // growing app queue or an extra BGRA-to-YUV conversion in VideoToolbox.
+            configuration.queueDepth = 5; configuration.showsCursor = true
+            configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             configuration.capturesAudio = audio
             configuration.sampleRate = 48000; configuration.channelCount = 2
             configuration.excludesCurrentProcessAudio = true
@@ -302,6 +322,9 @@ final class ConnectionManager: ObservableObject {
                     self.previousSample = (now, captured, count.0)
                     func fps(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "нет данных" }
                     self.statistics = "Кадры/с · захват Mac: \(fps(self.capturedFPS)) · приём декодера: \(fps(self.admittedFPS)) · выход декодера: \(fps(self.outputFPS)) · Surface ТВ: \(fps(self.renderedFPS))\nПринято: \(count.0) кадров · пропущено до передачи: \(count.1)"
+                    let processing = pipeline.processing
+                    let frames = self.output?.frameCounts ?? (complete: 0, idle: 0, other: 0)
+                    self.processingStatistics = "Кодирование, p95: \(fps(processing.encoder.p95MS)) мс · подтверждение ТВ, p95: \(fps(processing.admission.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(processing.frames)"
                 }
             }
             startTask = nil
@@ -312,10 +335,17 @@ final class ConnectionManager: ObservableObject {
     }
 
     func stop(reason: String = "Остановлено") async {
-        guard !stopping else { return }
+        if stopping {
+            await withCheckedContinuation { stopWaiters.append($0) }
+            return
+        }
         stopping = true
         isStopping = true; status = "Остановка трансляции…"
-        defer { stopping = false; isStopping = false }
+        defer {
+            stopping = false; isStopping = false
+            let waiters = stopWaiters; stopWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
         token = UUID()
         let starting = startTask; startTask = nil; starting?.cancel()
         await transport?.stopAndWait()
@@ -345,7 +375,7 @@ final class ConnectionManager: ObservableObject {
             }
         }
         captureDisplayID = 0
-        active = false; decodedOnTV = false; statistics = ""; status = reason
+        active = false; decodedOnTV = false; statistics = ""; processingStatistics = ""; status = reason
         capturedFPS = nil; admittedFPS = nil; outputFPS = nil; renderedFPS = nil
     }
 
@@ -360,6 +390,7 @@ final class ConnectionManager: ObservableObject {
             let requested = StreamMode(width: Int(config["width"] ?? "1366") ?? 1366,
                 height: Int(config["height"] ?? "768") ?? 768, fps: Int(config["fps"] ?? "60") ?? 60)
             guard requested.valid else { throw StreamError.invalid }
+            let withAudio = config["audio"] == "true"
             var runs: [[String: Any]] = []
             for cycle in 1...2 {
                 if let prepare {
@@ -368,7 +399,7 @@ final class ConnectionManager: ObservableObject {
                     }
                     if let error { showReadinessError(error); throw StreamError.unavailable }
                 }
-                start(host: host, pin: pin, identity: identity, mode: requested)
+                start(host: host, pin: pin, identity: identity, mode: requested, audio: withAudio)
                 for _ in 0..<200 {
                     if capture != nil && startTask == nil || !active { break }
                     try await Task.sleep(nanoseconds: 100_000_000)
@@ -390,16 +421,16 @@ final class ConnectionManager: ObservableObject {
                 window.contentView = view
                 window.orderFrontRegardless(); testWindow = window
                 window.setFrameOrigin(NSPoint(x: screen.frame.minX + 40, y: screen.frame.minY + 40))
-                let motion = Timer(timeInterval: 1.0 / 60, repeats: true) { _ in
-                    MainActor.assumeIsolated { view.advance() }
-                }
-                RunLoop.main.add(motion, forMode: .common)
+                let motion = screen.displayLink(target: view, selector: #selector(RuntimeMotionView.advance(_:)))
+                motion.preferredFrameRateRange = CAFrameRateRange(minimum: Float(requested.fps), maximum: Float(requested.fps), preferred: Float(requested.fps))
+                motion.add(to: .main, forMode: .common)
                 try await Task.sleep(nanoseconds: 3_000_000_000)
                 let initialCount = pipeline?.counts.0 ?? 0, initialCaptured = pipeline?.capturedCount ?? 0
                 let initialTV = previousReport
+                let initialTicks = view.tick
                 let began = ProcessInfo.processInfo.systemUptime
                 var samples: [[String: Any]] = []
-                for _ in 0..<8 {
+                for _ in 0..<(withAudio ? 15 : 8) {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                     guard active else { break }
                     samples.append(["capture_fps": capturedFPS ?? -1, "admission_fps": admittedFPS ?? -1,
@@ -408,6 +439,9 @@ final class ConnectionManager: ObservableObject {
                 let seconds = ProcessInfo.processInfo.systemUptime - began
                 let finalCount = pipeline?.counts ?? (0, 0), finalCaptured = pipeline?.capturedCount ?? 0
                 let tvRates = initialTV.flatMap { previousReport?.rates(since: $0) }
+                let timing = pipeline?.timing
+                let processing = pipeline?.processing
+                let captureCounts = output?.frameCounts
                 var run: [String: Any] = ["cycle": cycle, "started": true, "target_fps": requested.fps,
                     "width": requested.width, "height": requested.height,
                     "mode_matches": DisplayTopology.state(of: id)?.matches(requested) == true,
@@ -416,6 +450,25 @@ final class ConnectionManager: ObservableObject {
                     "admission_fps": Double(finalCount.0 - initialCount) / seconds,
                     "dropped_before_send": finalCount.1, "samples": samples, "status_before_stop": status]
                 run["test_window_on_owned_display"] = (window.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32) == id
+                run["audio_packets_submitted"] = pipeline?.audioPacketCount ?? 0
+                run["stimulus_fps"] = Double(view.tick - initialTicks) / seconds
+                run["active_before_stop"] = active
+                run["capture_complete"] = captureCounts?.complete
+                run["capture_idle"] = captureCounts?.idle
+                run["capture_other"] = captureCounts?.other
+                run["codec_frames"] = processing?.frames
+                run["encoder_latency_p95_ms"] = processing?.encoder.p95MS
+                run["encoder_latency_max_ms"] = processing?.encoder.maximumMS
+                run["admission_latency_p95_ms"] = processing?.admission.p95MS
+                run["admission_latency_max_ms"] = processing?.admission.maximumMS
+                if let timing {
+                    run["capture_interval_p95_ms"] = timing.0.p95MS
+                    run["capture_interval_max_ms"] = timing.0.maximumMS
+                    run["capture_long_gaps"] = timing.0.longGaps
+                    run["admission_interval_p95_ms"] = timing.1.p95MS
+                    run["admission_interval_max_ms"] = timing.1.maximumMS
+                    run["admission_long_gaps"] = timing.1.longGaps
+                }
                 if let tvRates {
                     run["decoder_output_fps"] = tvRates.0
                     if previousReport?.rendered ?? 0 > 0 { run["surface_fps"] = tvRates.1 }
@@ -428,7 +481,7 @@ final class ConnectionManager: ObservableObject {
                 runs.append(run)
                 try await Task.sleep(nanoseconds: 1_000_000_000)
             }
-            let report: [String: Any] = ["runs": runs, "capture_scope": "owned virtual display with generated moving bar", "audio": false]
+            let report: [String: Any] = ["runs": runs, "capture_scope": "owned virtual display with generated moving bar", "stimulus": "AppKit display link", "audio": withAudio]
             let destination = configuration.deletingLastPathComponent().appendingPathComponent("runtime-report-\(UUID().uuidString).json")
             let saved = FileManager.default.createFile(atPath: destination.path,
                 contents: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted]), attributes: [.posixPermissions: 0o600])
