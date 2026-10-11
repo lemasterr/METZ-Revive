@@ -50,6 +50,7 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
     private var waitingError: NWError?
     var decoded: (() -> Void)?
     var frameReport: ((TVFrameReport) -> Void)?
+    var frameTrace: ((TVFrameTrace) -> Void)?
     var keyframeRequested: (() -> Void)?
     var ready: (() -> Void)?
     var failure: ((String) -> Void)?
@@ -169,6 +170,9 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
                 else if byte == 0x54 {
                     self.readFrameReport(connection, token: token); return
                 }
+                else if byte == 0x55 {
+                    self.readFrameTrace(connection, token: token); return
+                }
                 else if byte == 0xE4 {
                     self.readFormatFailure(connection, token: token); return
                 }
@@ -196,6 +200,20 @@ final class StreamTransport: FramePacketTransport, @unchecked Sendable {
             guard let data, !ended, error == nil, let report = try? TVFrameReport.parse(data) else { self.fail(); return }
             self.frameReport?(report)
             self.readReceipt(connection, token: token)
+        }
+    }
+    private func readFrameTrace(_ connection: NWConnection, token: UUID) {
+        connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, ended, error in
+            guard let self, self.generation == token else { return }
+            guard let data, data.count == 4, !ended, error == nil else { self.fail(); return }
+            let size = data.reduce(0) { ($0 << 8) | Int($1) }
+            guard size >= 8, size <= TVFrameTrace.maximumBytes, (size - 8) % 24 == 0 else { self.fail(); return }
+            connection.receive(minimumIncompleteLength: size, maximumLength: size) { [weak self] bytes, _, ended, error in
+                guard let self, self.generation == token else { return }
+                guard let bytes, !ended, error == nil, let trace = try? TVFrameTrace.parse(bytes) else { self.fail(); return }
+                self.frameTrace?(trace)
+                self.readReceipt(connection, token: token)
+            }
         }
     }
     private func readFrameReceipt(_ connection: NWConnection, token: UUID) {

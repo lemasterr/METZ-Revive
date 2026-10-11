@@ -9,10 +9,30 @@ import QuartzCore
 @MainActor
 private final class RuntimeMotionView: NSView {
     private(set) var tick = 0
-    func startMotion() {
+    func startMotion(pattern: String = "bar") {
         wantsLayer = true
         guard let layer, bounds.width > 120 else { return }
         layer.backgroundColor = NSColor.black.cgColor
+        if pattern == "grid" {
+            for row in 0..<6 { for column in 0..<10 {
+                let tile = CAGradientLayer()
+                let cell = CGSize(width: bounds.width / 10, height: bounds.height / 6)
+                tile.bounds = CGRect(origin: .zero, size: cell)
+                tile.position = CGPoint(x: (Double(column) + 0.5) * cell.width, y: (Double(row) + 0.5) * cell.height)
+                tile.colors = [NSColor(hue: CGFloat((row * 10 + column) % 13) / 13,
+                    saturation: 0.8, brightness: 0.9, alpha: 1).cgColor, NSColor.black.cgColor]
+                tile.startPoint = CGPoint(x: 0, y: 0); tile.endPoint = CGPoint(x: 1, y: 1)
+                layer.addSublayer(tile)
+                let movement = CABasicAnimation(keyPath: "transform.rotation.z")
+                movement.fromValue = 0; movement.toValue = Double.pi * 2
+                movement.duration = 2 + Double((row + column) % 4) / 3
+                movement.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+                movement.repeatCount = .greatestFiniteMagnitude
+                movement.timingFunction = CAMediaTimingFunction(name: .linear)
+                tile.add(movement, forKey: "runtimeGrid")
+            } }
+            return
+        }
         let bar = CALayer()
         bar.bounds = CGRect(x: 0, y: 0, width: 120, height: bounds.height)
         bar.position = CGPoint(x: 60, y: bounds.midY)
@@ -50,7 +70,16 @@ private final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDele
         lock.lock(); frameStates[status, default: 0] += 1; lock.unlock()
         guard status == SCFrameStatus.complete.rawValue,
             let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
-        pipeline.submit(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sample))
+        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+        // displayTime is mach absolute time, independently of the sample PTS epoch.
+        // Convert it explicitly; absent metadata must not become zero latency.
+        let delivery = (attachments.first?[.displayTime] as? NSNumber).flatMap { timestamp -> Double? in
+            guard timestamp.uint64Value > 0 else { return nil }
+            let displayed = CMClockMakeHostTimeFromSystemUnits(timestamp.uint64Value)
+            let seconds = CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), displayed).seconds
+            return seconds.isFinite && seconds >= 0 ? seconds : nil
+        }
+        pipeline.submit(buffer, pts: pts, deliverySeconds: delivery)
     }
     private func submitAudio(_ sample: CMSampleBuffer) {
         guard sample.isValid, let description = CMSampleBufferGetFormatDescription(sample),
@@ -105,7 +134,11 @@ final class ConnectionManager: ObservableObject {
     @Published private(set) var outputFPS: Double?
     @Published private(set) var renderedFPS: Double?
     private var previousReport: TVFrameReport?
+    private var lastReportTime: Double?
+    private var journal: StreamJournal?
+    private var sourceRefresh: Double?
     private var previousSample: (time: Double, captured: Int, admitted: Int, bytes: Int)?
+    private var previousEncodedFrames = 0
     @Published private(set) var lastFailure = UserDefaults.standard.string(forKey: "displayLastFailure") ?? ""
     private var lastDisplayID: CGDirectDisplayID = 0
     private var captureDisplayID: CGDirectDisplayID = 0
@@ -159,9 +192,18 @@ final class ConnectionManager: ObservableObject {
         streamActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
             reason: "Передача второго экрана на телевизор")
         capturedFPS = nil; admittedFPS = nil; outputFPS = nil; renderedFPS = nil
-        previousReport = nil; previousSample = nil
+        previousReport = nil; previousSample = nil; lastReportTime = nil; sourceRefresh = nil
+        journal = try? StreamJournal(mode: mode, audio: audio)
         let current = UUID(); token = current
         let transport = StreamTransport(); self.transport = transport
+        let sessionJournal = journal
+        transport.frameTrace = { trace in
+            sessionJournal?.record(.tvReport, ["trace_omitted": Double(trace.omitted)])
+            for frame in trace.frames {
+                sessionJournal?.record(.tvFrame, ["stage": Double(frame.stage), "pts_us": Double(frame.pts),
+                    "receiver_elapsed_us": Double(frame.elapsedUS)])
+            }
+        }
         transport.failure = { [weak self] reason in Task { @MainActor in
             guard let self, self.token == current else { return }
             await self.stop(reason: reason)
@@ -180,6 +222,9 @@ final class ConnectionManager: ObservableObject {
                 self.renderedFPS = report.rendered > 0 ? rates.1 : nil
             }
             self.previousReport = report
+            self.lastReportTime = ProcessInfo.processInfo.systemUptime
+            self.journal?.record(.tvReport, ["output_frames": Double(report.output),
+                "rendered_frames": Double(report.rendered), "receiver_elapsed_us": Double(report.elapsedUS)])
         } }
         transport.keyframeRequested = { [weak self] in Task { @MainActor in
             guard let self, self.token == current else { return }
@@ -295,7 +340,10 @@ final class ConnectionManager: ObservableObject {
             try Task.checkCancellation()
             guard token == current, let display = content.displays.first(where: { $0.displayID == id }) else { throw StreamError.unavailable }
             stage = .encoder
-            let encoder = try FramePipeline(transport: transport, mode: mode, audio: audio, paceFrames: handle != nil && mode.fps < 60)
+            let refresh = CGDisplayCopyDisplayMode(id)?.refreshRate ?? 0
+            sourceRefresh = refresh > 0 && refresh.isFinite ? refresh : nil
+            let encoder = try FramePipeline(transport: transport, mode: mode, audio: audio,
+                sourceFPS: sourceRefresh.map { Int($0.rounded()) } ?? 60, journal: journal, paced: true)
             pipeline = encoder
             let failure: (String) -> Void = { [weak self] reason in Task { @MainActor in
                 guard let self, self.token == current else { return }
@@ -308,10 +356,11 @@ final class ConnectionManager: ObservableObject {
             configuration.width = mode.width; configuration.height = mode.height
             // Keep the owned compositor at 60 Hz. Select fresh frames on one
             // timeline for lower stream rates, instead of stacking equal-rate throttles.
-            configuration.minimumFrameInterval = handle != nil ? .zero : CMTime(value: 1, timescale: Int32(mode.fps))
+            configuration.minimumFrameInterval = CMTime(value: 1, timescale: Int32(handle != nil ? 60 : mode.fps))
             configuration.queueDepth = 5; configuration.showsCursor = true
-            // Use the conservative capture format; hardware AVC performs conversion.
-            configuration.pixelFormat = kCVPixelFormatType_32BGRA
+            // Capture in the hardware encoder's native YUV format, avoiding retained
+            // full-size RGB surfaces and a separate RGB conversion for every encode.
+            configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             configuration.capturesAudio = audio
             configuration.sampleRate = 48000; configuration.channelCount = 2
             configuration.excludesCurrentProcessAudio = true
@@ -324,23 +373,41 @@ final class ConnectionManager: ObservableObject {
             guard token == current else { throw CancellationError() }
             status = "Второй экран подключён · \(mode.title) · звук \(audio ? "включён" : "выключен")"
             previousSample = (ProcessInfo.processInfo.systemUptime, encoder.capturedCount, encoder.counts.0, encoder.processing.bytes)
+            previousEncodedFrames = encoder.snapshot.codecFrames
             monitor = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self, let pipeline = self.pipeline else { return }
-                    let count = pipeline.counts
-                    let processing = pipeline.processing
+                    guard self.token == current, self.active else { return }
+                    let snapshot = pipeline.snapshot
                     var encodedMbps: Double?
-                    let now = ProcessInfo.processInfo.systemUptime, captured = pipeline.capturedCount
+                    let now = ProcessInfo.processInfo.systemUptime, captured = snapshot.captured
+                    var fields = snapshot.numbers
+                    fields["target_fps"] = Double(self.configuredMode.fps)
+                    fields["source_refresh_hz"] = self.sourceRefresh
                     if let previous = self.previousSample, now > previous.time {
                         self.capturedFPS = Double(captured - previous.captured) / (now - previous.time)
-                        self.admittedFPS = Double(count.0 - previous.admitted) / (now - previous.time)
-                        encodedMbps = Double(processing.bytes - previous.bytes) * 8 / (now - previous.time) / 1_000_000
+                        self.admittedFPS = Double(snapshot.admitted - previous.admitted) / (now - previous.time)
+                        encodedMbps = Double(snapshot.bytes - previous.bytes) * 8 / (now - previous.time) / 1_000_000
+                        fields["interval_s"] = now - previous.time
+                        fields["encoded_fps"] = Double(snapshot.codecFrames - self.previousEncodedFrames) / (now - previous.time)
                     }
-                    self.previousSample = (now, captured, count.0, processing.bytes)
+                    self.previousEncodedFrames = snapshot.codecFrames
+                    self.previousSample = (now, captured, snapshot.admitted, snapshot.bytes)
+                    if let reportTime = self.lastReportTime {
+                        fields["tv_report_age_s"] = now - reportTime
+                        if now - reportTime > 2.5 { self.outputFPS = nil; self.renderedFPS = nil }
+                    }
+                    fields["capture_fps"] = self.capturedFPS; fields["admission_fps"] = self.admittedFPS
+                    fields["output_fps"] = self.outputFPS; fields["surface_fps"] = self.renderedFPS
+                    fields["video_mbps"] = encodedMbps
                     func fps(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "нет данных" }
-                    self.statistics = "Кадры/с · захват Mac: \(fps(self.capturedFPS)) · приём декодера: \(fps(self.admittedFPS)) · выход декодера: \(fps(self.outputFPS)) · Surface ТВ: \(fps(self.renderedFPS))\nПринято: \(count.0) кадров · пропущено до передачи: \(count.1)"
+                    self.statistics = "Кадры/с · захват Mac: \(fps(self.capturedFPS)) · приём декодера: \(fps(self.admittedFPS)) · выход декодера: \(fps(self.outputFPS)) · Surface ТВ: \(fps(self.renderedFPS))\nПринято: \(snapshot.admitted) · заменено до кодирования: \(snapshot.replaced) · пропущено кодером: \(snapshot.codecDropped)"
                     let frames = self.output?.frameCounts ?? (complete: 0, idle: 0, other: 0)
-                    self.processingStatistics = "Видеопоток, кодирование: \(fps(encodedMbps)) Мбит/с\nКодирование, p95: \(fps(processing.encoder.p95MS)) мс · подтверждение ТВ, p95: \(fps(processing.admission.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(processing.frames)"
+                    fields["capture_complete"] = Double(frames.complete); fields["capture_idle"] = Double(frames.idle)
+                    fields["capture_other"] = Double(frames.other)
+                    self.journal?.record(.sample, fields)
+                    self.processingStatistics = "Видеопоток, кодирование: \(fps(encodedMbps)) Мбит/с\nКодирование, p95: \(fps(snapshot.encoderLatency.p95MS)) мс · доставка захвата, p95: \(fps(snapshot.captureDelivery.p95MS)) мс · подтверждение ТВ, p95: \(fps(snapshot.admissionLatency.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(snapshot.codecFrames)\nПланировщик \(self.configuredMode.fps): новых кадров захвата \(snapshot.freshEncoded) · повторов \(snapshot.repeatedEncoded)\nПропущено тактов: \(snapshot.pacingSkipped) · обновлений объединено: \(snapshot.selectionSkipped)"
+                    if self.journal?.available != true { self.processingStatistics += "\nЖурнал сеанса недоступен" }
                 }
             }
             startTask = nil
@@ -375,11 +442,18 @@ final class ConnectionManager: ObservableObject {
             UserDefaults.standard.set(reason, forKey: "displayLastFailure")
         }
         monitor?.invalidate(); monitor = nil
+        let sessionJournal = journal; journal = nil
+        let ownedDisplay = handle != nil ? captureDisplayID : nil
         testWindow?.close(); testWindow = nil
         if let originalCursor { CGWarpMouseCursorPosition(originalCursor); self.originalCursor = nil }
         let stream = capture; capture = nil
-        if let stream { try? await stream.stopCapture() }
-        pipeline?.stop(); pipeline = nil; output = nil
+        var captureStopped = true
+        if let stream {
+            do { try await stream.stopCapture() } catch { captureStopped = false }
+        }
+        pipeline?.stop()
+        let finalCounts = pipeline?.snapshot.numbers ?? [:]
+        pipeline = nil; output = nil
         await transport?.stopAndWait(); transport = nil
         if let handle {
             let releasedID = captureDisplayID
@@ -391,6 +465,17 @@ final class ConnectionManager: ObservableObject {
             }
         }
         captureDisplayID = 0
+        var endFields = finalCounts
+        endFields["normal_stop"] = reason == "Остановлено" ? 1 : 0
+        endFields["capture_released"] = capture == nil ? 1 : 0
+        endFields["capture_stop_succeeded"] = captureStopped ? 1 : 0
+        endFields["pipeline_released"] = pipeline == nil ? 1 : 0
+        endFields["transport_released"] = transport == nil ? 1 : 0
+        endFields["display_released"] = handle == nil ? 1 : 0
+        if let ownedDisplay, let present = DisplayTopology.contains(ownedDisplay) {
+            endFields["display_removed"] = present ? 0 : 1
+        }
+        await sessionJournal?.finish(endFields)
         if let activity = streamActivity { ProcessInfo.processInfo.endActivity(activity); streamActivity = nil }
         active = false; decodedOnTV = false; statistics = ""; processingStatistics = ""; status = reason
         capturedFPS = nil; admittedFPS = nil; outputFPS = nil; renderedFPS = nil
@@ -453,7 +538,7 @@ final class ConnectionManager: ObservableObject {
                 window.contentView = view
                 window.orderFrontRegardless(); testWindow = window
                 window.setFrameOrigin(NSPoint(x: screen.frame.minX + 40, y: screen.frame.minY + 40))
-                view.startMotion()
+                view.startMotion(pattern: config["stimulus"] == "grid" ? "grid" : "bar")
                 let motion = screen.displayLink(target: view, selector: #selector(RuntimeMotionView.advance(_:)))
                 let stimulusFPS = 60
                 motion.preferredFrameRateRange = CAFrameRateRange(minimum: Float(stimulusFPS), maximum: Float(stimulusFPS), preferred: Float(stimulusFPS))
@@ -540,7 +625,7 @@ final class ConnectionManager: ObservableObject {
                 checkpoint(["runs": runs, "cycle": cycle, "stopped": true])
                 try await Task.sleep(nanoseconds: 1_000_000_000)
             }
-            let report: [String: Any] = ["runs": runs, "capture_scope": "owned virtual display with generated moving bar", "stimulus": "Core Animation moving layer; display link counts clock callbacks only", "audio": withAudio]
+            let report: [String: Any] = ["runs": runs, "capture_scope": "owned virtual display with generated moving bar", "stimulus": config["stimulus"] == "grid" ? "generated rotating gradient grid" : "Core Animation moving layer; display link counts clock callbacks only", "audio": withAudio]
             let destination = configuration.deletingLastPathComponent().appendingPathComponent("runtime-report-\(UUID().uuidString).json")
             let saved = FileManager.default.createFile(atPath: destination.path,
                 contents: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted]), attributes: [.posixPermissions: 0o600])

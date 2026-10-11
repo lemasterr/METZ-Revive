@@ -4,7 +4,7 @@ cd "$(dirname "$0")"
 mkdir -p build/'METZ Display.app'/Contents/MacOS
 xcrun clang -fobjc-arc -fblocks -target arm64-apple-macosx15.0 -c VirtualDisplay.m -o build/VirtualDisplay.o
 swiftc -swift-version 5 -target arm64-apple-macosx15.0 -O -import-objc-header VirtualDisplay.h \
-    StreamProtocol.swift StreamTransport.swift FramePipeline.swift CaptureAccess.swift DisplayTopology.swift DisplayEngine.swift MetzTheme.swift DisplayApp.swift \
+    StreamProtocol.swift StreamJournal.swift StreamTransport.swift FramePipeline.swift CaptureAccess.swift DisplayTopology.swift DisplayEngine.swift MetzTheme.swift DisplayApp.swift \
     build/VirtualDisplay.o -framework CoreGraphics -o build/'METZ Display.app'/Contents/MacOS/MetzDisplay
 cat > build/'METZ Display.app'/Contents/Info.plist <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

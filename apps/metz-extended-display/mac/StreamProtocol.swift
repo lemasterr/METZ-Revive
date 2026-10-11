@@ -52,6 +52,29 @@ struct FrameRateSelector {
     }
 }
 
+/// One slot per presentation deadline. A late callback skips slots, never replays them.
+struct FrameClock {
+    struct Tick { let index: Int64; let skipped: Int64; let lateMS: Double }
+    let origin: Double
+    let fps: Int
+    private var previous: Int64 = -1
+    static func captureMargin(sourceFPS: Int, outputFPS: Int) -> Double {
+        0.5 / Double(max(1, max(sourceFPS, outputFPS)))
+    }
+    init(origin: Double, fps: Int) { self.origin = origin; self.fps = fps }
+    mutating func tick(at now: Double) -> Tick? {
+        guard origin.isFinite, now.isFinite, fps > 0, now >= origin else { return nil }
+        let slot = floor((now - origin + 0.0005) * Double(fps))
+        guard slot < Double(Int64.max), slot >= 0 else { return nil }
+        let index = Int64(slot)
+        guard index > previous else { return nil }
+        let skipped = index - previous - 1
+        previous = index
+        return Tick(index: index, skipped: skipped,
+            lateMS: max(0, now - origin - Double(index) / Double(fps)) * 1000)
+    }
+}
+
 /// A bounded window of actual intervals; absent samples never become zero.
 struct FrameCadence {
     private var previous: Double?
@@ -107,6 +130,25 @@ struct TVFrameReport: Equatable {
         guard elapsedUS > previous.elapsedUS, output >= previous.output, rendered >= previous.rendered else { return nil }
         let seconds = Double(elapsedUS - previous.elapsedUS) / 1_000_000
         return (Double(output - previous.output) / seconds, Double(rendered - previous.rendered) / seconds)
+    }
+}
+
+struct TVFrameTrace {
+    struct Frame { let stage, pts, elapsedUS: UInt64 }
+    static let maximumBytes = 8 + 256 * 24
+    let omitted: UInt64
+    let frames: [Frame]
+    static func parse(_ data: Data) throws -> Self {
+        guard data.count >= 8, data.count <= maximumBytes, (data.count - 8) % 24 == 0 else { throw StreamError.invalid }
+        func number(_ offset: Int) -> UInt64 {
+            data[offset..<(offset + 8)].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        }
+        let frames = try stride(from: 8, to: data.count, by: 24).map { offset -> Frame in
+            let stage = number(offset)
+            guard stage <= 2 else { throw StreamError.invalid }
+            return Frame(stage: stage, pts: number(offset + 8), elapsedUS: number(offset + 16))
+        }
+        return Self(omitted: number(0), frames: frames)
     }
 }
 

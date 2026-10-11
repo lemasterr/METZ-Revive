@@ -8,6 +8,8 @@ private final class EncoderSink: FramePacketTransport {
     private let lock = NSLock()
     private(set) var configuration: [String: Any] = [:]
     private(set) var error: String?
+    private var timestamps: [UInt64] = []
+    var sent: [UInt64] { lock.lock(); defer { lock.unlock() }; return timestamps }
     func fail(_ message: String) { lock.lock(); error = message; lock.unlock(); arrived.signal() }
     func send(_ data: Data, pts: UInt64, completion: @escaping (Bool) -> Void) {
         var offset = 0
@@ -25,11 +27,84 @@ private final class EncoderSink: FramePacketTransport {
             offset += 24 + size
         }
         precondition(video)
+        lock.lock()
+        precondition(timestamps.last.map { $0 < pts } ?? true, "Encoded PTS must increase")
+        timestamps.append(pts); lock.unlock()
         completion(true)
         arrived.signal()
     }
     func sendAudio(_ data: Data) { preconditionFailure("Audio disabled in generated frame check") }
     func snapshot() -> ([String: Any], String?) { lock.lock(); defer { lock.unlock() }; return (configuration, error) }
+}
+
+private func checkFrameClock(fps: Int) throws {
+    let mode = StreamMode(width: 1366, height: 768, fps: fps), sink = EncoderSink()
+    let pipeline = try FramePipeline(transport: sink, mode: mode, paced: true)
+    defer { pipeline.stop() }
+    pipeline.failure = sink.fail
+    var pixel: CVPixelBuffer?
+    precondition(CVPixelBufferCreate(nil, mode.width, mode.height, kCVPixelFormatType_32BGRA,
+        [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pixel) == kCVReturnSuccess)
+    let buffer = pixel!
+    CVPixelBufferLockBaseAddress(buffer, [])
+    memset(CVPixelBufferGetBaseAddress(buffer)!, 40, CVPixelBufferGetBytesPerRow(buffer) * mode.height)
+    CVPixelBufferUnlockBaseAddress(buffer, [])
+    func wait(_ condition: () -> Bool) {
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while !condition() && ProcessInfo.processInfo.systemUptime < deadline { Thread.sleep(forTimeInterval: 0.002) }
+        precondition(condition(), "Generated clock pipeline timed out")
+    }
+    pipeline.submit(buffer, pts: .zero)
+    wait { sink.sent.count >= 6 }
+    let first = pipeline.snapshot
+    precondition(first.captured == 1 && first.freshEncoded == 1 && first.repeatedEncoded >= 5)
+    precondition(first.freshEncoded + first.repeatedEncoded == first.codecFrames)
+    for pts in sink.sent {
+        let slot = (Double(pts) * Double(fps) / 1_000_000).rounded()
+        precondition(abs(Double(pts) - slot * 1_000_000 / Double(fps)) <= 1, "PTS left the presentation grid")
+    }
+    pipeline.submit(buffer, pts: CMTime(value: Int64(sink.sent.count + 2), timescale: Int32(fps)))
+    wait { pipeline.snapshot.freshEncoded == 2 }
+    pipeline.submit(buffer, pts: .zero)
+    precondition(pipeline.capturedCount == 2, "Out-of-order source replaced the newest capture")
+    pipeline.stop()
+    let stopped = pipeline.snapshot
+    Thread.sleep(forTimeInterval: 0.08)
+    precondition(pipeline.snapshot.selected == stopped.selected && pipeline.snapshot.codecFrames == stopped.codecFrames,
+        "Stopped clock must not repeat or retain work")
+    precondition(sink.snapshot().1 == nil)
+    print("Generated clock: \(fps) FPS grid, fresh/repeat distinction, stale source rejection and timer stop passed")
+}
+
+// Verify the hardware's emitted Baseline SPS, rather than only a setter return code.
+private func baselineReferenceFrames(_ data: Data) -> Int {
+    let nal = [UInt8](data)
+    precondition(nal.count > 5 && Array(nal.prefix(4)) == [0, 0, 0, 1] && nal[4] & 31 == 7)
+    var rbsp: [UInt8] = [], zeros = 0
+    for byte in nal.dropFirst(5) {
+        if zeros >= 2 && byte == 3 { zeros = 0; continue }
+        rbsp.append(byte); zeros = byte == 0 ? zeros + 1 : 0
+    }
+    var bit = 0
+    func read(_ count: Int = 1) -> Int {
+        precondition(bit + count <= rbsp.count * 8)
+        var value = 0
+        for _ in 0..<count {
+            value = value * 2 + Int((rbsp[bit / 8] >> (7 - bit % 8)) & 1); bit += 1
+        }
+        return value
+    }
+    func unsignedGolomb() -> Int {
+        var count = 0
+        while read() == 0 { count += 1; precondition(count < 32) }
+        return (1 << count) - 1 + read(count)
+    }
+    precondition(read(8) == 66, "Generated stream must remain Baseline")
+    _ = read(16); _ = unsignedGolomb(); _ = unsignedGolomb()
+    let orderType = unsignedGolomb()
+    precondition(orderType == 0 || orderType == 2)
+    if orderType == 0 { _ = unsignedGolomb() }
+    return unsignedGolomb()
 }
 
 private final class HeldFrameSink: FramePacketTransport {
@@ -86,9 +161,63 @@ private func checkBoundedOverlap(capacity: Int) throws {
     precondition(pipeline.counts.0 == admitted, "Late ACK changed stopped counters")
     print("Bounded overlap/order/latest raw/late ACK passed with credit \(capacity)")
 }
+
+private func checkPacedBackpressure(capacity: Int) async throws {
+    let manager = FileManager.default
+    let folder = manager.temporaryDirectory.appendingPathComponent("metz-clock-check-" + UUID().uuidString)
+    defer { try? manager.removeItem(at: folder) }
+    let mode = StreamMode(width: 1366, height: 768, fps: 60)
+    let journal = try StreamJournal(mode: mode, audio: false, folder: folder)
+    let sink = HeldFrameSink(capacity: capacity)
+    let pipeline = try FramePipeline(transport: sink, mode: mode, journal: journal, paced: true)
+    defer { pipeline.stop() }
+    pipeline.failure = { _ in preconditionFailure("Generated paced pipeline failed") }
+    var pixel: CVPixelBuffer?
+    precondition(CVPixelBufferCreate(nil, mode.width, mode.height, kCVPixelFormatType_32BGRA,
+        [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pixel) == kCVReturnSuccess)
+    let buffer = pixel!
+    CVPixelBufferLockBaseAddress(buffer, [])
+    memset(CVPixelBufferGetBaseAddress(buffer)!, 40, CVPixelBufferGetBytesPerRow(buffer) * mode.height)
+    CVPixelBufferUnlockBaseAddress(buffer, [])
+    func wait(_ condition: () -> Bool) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while !condition() && ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 2_000_000) }
+        precondition(condition(), "Generated paced backpressure timed out")
+    }
+    pipeline.submit(buffer, pts: .zero)
+    try await wait { pipeline.processing.frames == capacity + 1 }
+    for frame in 1...30 {
+        pipeline.submit(buffer, pts: CMTime(value: Int64(frame), timescale: 120))
+        try await Task.sleep(nanoseconds: 4_000_000)
+    }
+    try await Task.sleep(nanoseconds: 40_000_000)
+    precondition(pipeline.processing.frames == capacity + 1 && sink.sent.count == capacity)
+    precondition(pipeline.snapshot.replaced > 0 && pipeline.snapshot.captured == 31)
+    sink.release()
+    try await wait { pipeline.processing.frames == capacity + 2 && pipeline.counts.0 == 1 }
+    sink.release()
+    try await wait { sink.sent.count == capacity + 2 && pipeline.counts.0 == 2 }
+    pipeline.stop()
+    let stopped = pipeline.snapshot
+    for _ in 0..<capacity { sink.release() }
+    try await Task.sleep(nanoseconds: 60_000_000)
+    precondition(pipeline.snapshot.admitted == stopped.admitted && pipeline.snapshot.selected == stopped.selected)
+    await journal.finish(stopped.numbers)
+    let paths = try manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).filter { $0.pathExtension == "jsonl" }
+    var encoded: [[String: Any]] = []
+    for path in paths {
+        for line in try String(contentsOf: path, encoding: .utf8).split(separator: "\n") {
+            let record = try JSONSerialization.jsonObject(with: Data(line.utf8)) as! [String: Any]
+            if record["event"] as? String == "encoded" { encoded.append(record) }
+        }
+    }
+    precondition(encoded.last?["source_frame"] as? Int == 31, "Blocked clock must resume with the newest raw source")
+    precondition(encoded.count == capacity + 2 && journal.available)
+    print("Paced credit \(capacity): bounded backlog, newest source, ordered PTS, late ACK and timer cleanup passed")
+}
 @main
 struct EncoderCheck {
-    static func main() throws {
+    static func main() async throws {
         for mode in StreamMode.candidates { for pixelFormat in [kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange] {
             let sink = EncoderSink()
             let pipeline = try FramePipeline(transport: sink, mode: mode)
@@ -117,6 +246,8 @@ struct EncoderCheck {
                 precondition(error == nil, "Encoder failure")
                 precondition(config["width"] as? Int == mode.width && config["height"] as? Int == mode.height && config["fps"] as? Int == mode.fps)
                 precondition(config["profile"] as? String == "baseline-" + mode.level)
+                precondition(baselineReferenceFrames(Data(base64Encoded: config["sps"] as! String)!) == 1,
+                    "Hardware encoder must emit one reference buffer")
             }
             pipeline.stop()
             print("Hardware generated frames passed: \(mode.id), pixel format \(pixelFormat)")
@@ -124,5 +255,7 @@ struct EncoderCheck {
         print("\(StreamMode.candidates.count * 4) generated frames; no captured content, display/private API, network, UI or speed benchmark.")
         try checkBoundedOverlap(capacity: 1)
         try checkBoundedOverlap(capacity: 2)
+        for fps in [30, 50, 60] { try checkFrameClock(fps: fps) }
+        for capacity in [1, 2] { try await checkPacedBackpressure(capacity: capacity) }
     }
 }
