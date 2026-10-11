@@ -58,6 +58,23 @@ class StreamJournalAnalysisCheck(unittest.TestCase):
             with self.assertRaises(ValueError):
                 journal.analyze(path)
 
+    def test_paced_stream_does_not_report_repeats_as_new_capture(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            summary = root / "session-fixture-summary.json"
+            summary.write_text(json.dumps({"target_fps": 60, "last": {
+                "capture_frames": 25, "fresh_encoded": 25, "repeated_encoded": 35, "pacing_skipped": 2}}))
+            lines = [{"event": "start", "segment": 0},
+                     {"event": "sample", "capture_fps": 25, "admission_fps": 60, "interval_s": 1},
+                     {"event": "pace", "late_ms": 1.5}, {"event": "pace", "late_ms": 5}]
+            (root / "session-fixture-0.jsonl").write_text("\n".join(json.dumps(line) for line in lines))
+            result = journal.analyze(summary)
+            self.assertEqual(result["rates"]["capture_fps"]["mean"], 25)
+            self.assertEqual(result["totals"]["fresh_encoded"], 25)
+            self.assertEqual(result["totals"]["repeated_encoded"], 35)
+            self.assertEqual(result["totals"]["pacing_skipped"], 2)
+            self.assertEqual(result["timings"]["pace_late_ms"]["max"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

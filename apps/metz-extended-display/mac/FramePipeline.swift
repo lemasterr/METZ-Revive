@@ -21,6 +21,8 @@ enum SessionAudioTime {
 
 struct FramePipelineSnapshot {
     let captured, selected, selectionSkipped, replaced, codecDropped, admitted, codecFrames, bytes, audioPackets: Int
+    let freshSelected, repeatedSelected, pacingSkipped: Int
+    let freshEncoded, repeatedEncoded: Int
     let capture, admission: FrameCadence
     let rawQueue, encoderLatency, admissionLatency: FrameLatency
     var numbers: [String: Double] {
@@ -28,6 +30,9 @@ struct FramePipelineSnapshot {
             "selection_skipped": Double(selectionSkipped), "raw_replaced": Double(replaced),
             "codec_dropped": Double(codecDropped), "admitted_frames": Double(admitted),
             "encoded_frames": Double(codecFrames), "video_bytes": Double(bytes), "audio_submitted": Double(audioPackets),
+            "fresh_selected": Double(freshSelected), "repeated_selected": Double(repeatedSelected),
+            "pacing_skipped": Double(pacingSkipped),
+            "fresh_encoded": Double(freshEncoded), "repeated_encoded": Double(repeatedEncoded),
             "capture_long_gaps": Double(capture.longGaps), "admission_long_gaps": Double(admission.longGaps)]
         for (name, value) in [("capture_p95_ms", capture.p95MS), ("capture_max_ms", capture.maximumMS),
             ("admission_p95_ms", admission.p95MS), ("admission_max_ms", admission.maximumMS),
@@ -43,13 +48,15 @@ final class FramePipeline: @unchecked Sendable {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "metz.stream.encoder", qos: .userInteractive)
     private var session: VTCompressionSession?
-    private var pending: (CVPixelBuffer, CMTime, Double, Int)?
+    private var pending: (CVPixelBuffer, CMTime, Double, Int, Int)?
     // Encoder and transmission overlap, but compressed reference frames remain ordered.
     // At most one encode, one queued packet and two transmissions can exist.
     private var encoding = false // encoder queue only
     private var sending = 0 // encoder queue only
     private var queuedPacket: (Data, UInt64, Int, Double)? // encoder queue only
     private var encodingFrameID = 0
+    private var encodingSourceID = 0 // encoder queue
+    private var lastEncodedSourceID = 0 // encoder queue
     private var encodingBegan = 0.0
     private var stopped = false
     private var basePTS: CMTime?
@@ -58,6 +65,18 @@ final class FramePipeline: @unchecked Sendable {
     private var encoded = 0
     private var captured = 0
     private var frameSelector = FrameRateSelector()
+    private let paced: Bool
+    private var latestCapture: (buffer: CVPixelBuffer, pts: CMTime, source: Int)? // lock
+    private var selectedSource = 0 // lock
+    private var freshSelected = 0 // lock
+    private var repeatedSelected = 0 // lock
+    private var pacingSkipped = 0 // lock
+    private var freshEncoded = 0 // lock
+    private var repeatedEncoded = 0 // lock
+    private var pacingStarted = false // lock
+    private var pacingTimer: DispatchSourceTimer? // encoder queue
+    private var frameClock: FrameClock? // encoder queue
+    private var clockPTS: CMTime? // encoder queue
     private let sourceFPS: Int
     private let journal: StreamJournal?
     private var captureOrigin: CMTime?
@@ -86,7 +105,10 @@ final class FramePipeline: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return FramePipelineSnapshot(captured: captured, selected: selected, selectionSkipped: selectionSkipped,
             replaced: replaced, codecDropped: codecDropped, admitted: encoded, codecFrames: codecFrames,
-            bytes: videoBytes, audioPackets: audioSubmitted, capture: captureCadence, admission: admissionCadence,
+            bytes: videoBytes, audioPackets: audioSubmitted,
+            freshSelected: freshSelected, repeatedSelected: repeatedSelected, pacingSkipped: pacingSkipped,
+            freshEncoded: freshEncoded, repeatedEncoded: repeatedEncoded,
+            capture: captureCadence, admission: admissionCadence,
             rawQueue: rawQueue, encoderLatency: encoderLatency, admissionLatency: admissionLatency)
     }
     var timing: (FrameCadence, FrameCadence) { lock.lock(); defer { lock.unlock() }; return (captureCadence, admissionCadence) }
@@ -95,10 +117,10 @@ final class FramePipeline: @unchecked Sendable {
     }
 
     init(transport: FramePacketTransport, mode: StreamMode = .conservative, audio: Bool = false,
-         sourceFPS: Int = 60, journal: StreamJournal? = nil) throws {
+         sourceFPS: Int = 60, journal: StreamJournal? = nil, paced: Bool = false) throws {
         guard mode.valid else { throw StreamError.invalid }
         self.transport = transport; self.mode = mode; self.audio = audio
-        self.sourceFPS = max(1, sourceFPS); self.journal = journal
+        self.sourceFPS = max(1, sourceFPS); self.journal = journal; self.paced = paced
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(mode.width), height: Int32(mode.height),
             codecType: kCMVideoCodecType_H264,
@@ -146,21 +168,73 @@ final class FramePipeline: @unchecked Sendable {
               CVPixelBufferGetHeight(buffer) == mode.height else { return }
         lock.lock()
         guard !stopped else { lock.unlock(); return }
+        if paced, let latest = latestCapture, pts <= latest.pts { lock.unlock(); return }
         captured += 1
         captureCadence.record(pts.seconds, expectedFPS: sourceFPS)
         if captureOrigin == nil { captureOrigin = pts }
+        if paced {
+            journal?.record(.capture, ["frame": Double(captured),
+                "source_pts_us": CMTimeSubtract(pts, captureOrigin!).seconds * 1_000_000])
+            // Keep only the newest source surface, including while transmission is blocked.
+            if let previous = latestCapture, previous.source != selectedSource { selectionSkipped += 1 }
+            latestCapture = (buffer, pts, captured)
+            let start = !pacingStarted; pacingStarted = true
+            lock.unlock()
+            if start { queue.async { self.startPacing() } }
+            return
+        }
         let accept = frameSelector.accepts(pts.seconds, fps: mode.fps)
         journal?.record(.capture, ["frame": Double(captured),
             "source_pts_us": CMTimeSubtract(pts, captureOrigin!).seconds * 1_000_000, "selected": accept ? 1 : 0])
         if !accept { selectionSkipped += 1; lock.unlock(); return }
-        selected += 1
+        selected += 1; freshSelected += 1
         if let pending {
             dropped += 1; replaced += 1
             journal?.record(.replaced, ["frame": Double(pending.3), "by_frame": Double(captured)])
         }
-        pending = (buffer, pts, ProcessInfo.processInfo.systemUptime, captured)
+        pending = (buffer, pts, ProcessInfo.processInfo.systemUptime, captured, captured)
         lock.unlock()
         queue.async { self.encodeNext() }
+    }
+
+    private func startPacing() {
+        lock.lock()
+        guard !stopped, let first = latestCapture else { lock.unlock(); return }
+        basePTS = first.pts; clockPTS = first.pts
+        lock.unlock()
+        // Sampling on the capture boundary races its callback: one source update
+        // is repeated, then two arrive before the next tick. Sample between source
+        // deadlines instead, leaving half a source interval for callback jitter.
+        let samplingDelay = FrameClock.captureMargin(sourceFPS: sourceFPS, outputFPS: mode.fps)
+        frameClock = FrameClock(origin: ProcessInfo.processInfo.systemUptime + samplingDelay, fps: mode.fps)
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + samplingDelay, repeating: 1 / Double(mode.fps), leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in self?.paceNext() }
+        pacingTimer = timer; timer.resume()
+    }
+
+    private func paceNext() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let tick = frameClock?.tick(at: now), let origin = clockPTS else { return }
+        lock.lock()
+        guard !stopped, let latest = latestCapture else { lock.unlock(); return }
+        let repeated = latest.source == selectedSource
+        selectedSource = latest.source
+        if repeated { repeatedSelected += 1 } else { freshSelected += 1 }
+        selected += 1; pacingSkipped += Int(tick.skipped)
+        let pts = CMTimeAdd(origin, CMTime(value: tick.index, timescale: Int32(mode.fps)))
+        journal?.record(.pace, ["frame": Double(selected), "source_frame": Double(latest.source),
+            "source_pts_us": CMTimeSubtract(latest.pts, captureOrigin!).seconds * 1_000_000,
+            "pts_us": CMTimeSubtract(pts, origin).seconds * 1_000_000,
+            "repeated": repeated ? 1 : 0, "late_ms": tick.lateMS,
+            "skipped": Double(tick.skipped)])
+        if let previous = pending {
+            dropped += 1; replaced += 1
+            journal?.record(.replaced, ["frame": Double(previous.3), "by_frame": Double(selected)])
+        }
+        pending = (latest.buffer, pts, now, selected, latest.source)
+        lock.unlock()
+        encodeNext()
     }
     func requestKeyframe() { queue.async {
         self.lock.lock(); let inactive = self.stopped; self.lock.unlock()
@@ -186,6 +260,7 @@ final class FramePipeline: @unchecked Sendable {
         var flags: VTEncodeInfoFlags = []
         encoding = true
         encodingFrameID = frame.3
+        encodingSourceID = frame.4
         encodingBegan = ProcessInfo.processInfo.systemUptime
         lock.lock(); rawQueue.record(seconds: encodingBegan - frame.2); lock.unlock()
         journal?.record(.encode, ["frame": Double(encodingFrameID),
@@ -251,12 +326,16 @@ final class FramePipeline: @unchecked Sendable {
             packets.append(try Wire.packet(type: 2, flags: key ? 1 : 0, epoch: epoch, pts: UInt64(us),
                 payload: Wire.annexB(avcc, nalLength: Int(nalLength))))
             let completed = ProcessInfo.processInfo.systemUptime
+            let repeated = encodingSourceID == lastEncodedSourceID
+            lastEncodedSourceID = encodingSourceID
             lock.lock(); codecFrames += 1; videoBytes += packets.count
+            if repeated { repeatedEncoded += 1 } else { freshEncoded += 1 }
             encoderLatency.record(seconds: completed - encodingBegan)
             lock.unlock()
             journal?.record(.encoded, ["frame": Double(encodingFrameID), "pts_us": Double(us),
                 "bytes": Double(packets.count), "encode_ms": (completed - encodingBegan) * 1000,
-                "keyframe": key ? 1 : 0])
+                "keyframe": key ? 1 : 0, "source_frame": Double(encodingSourceID),
+                "repeated": repeated ? 1 : 0])
             encoding = false
             queuedPacket = (packets, UInt64(us), encodingFrameID, completed)
             sendNext()
@@ -302,12 +381,14 @@ final class FramePipeline: @unchecked Sendable {
         }
     }
     private func failed(_ reason: String) {
-        lock.lock(); let notify = !stopped; stopped = true; pending = nil; lock.unlock()
+        lock.lock(); let notify = !stopped; stopped = true; pending = nil; latestCapture = nil; lock.unlock()
+        pacingTimer?.cancel(); pacingTimer = nil
         if notify { failure?(reason) }
     }
     func stop() {
-        lock.lock(); stopped = true; pending = nil; lock.unlock()
+        lock.lock(); stopped = true; pending = nil; latestCapture = nil; lock.unlock()
         queue.sync {
+            pacingTimer?.cancel(); pacingTimer = nil; frameClock = nil; clockPTS = nil
             queuedPacket = nil
             encoding = false; sending = 0
             if let session {

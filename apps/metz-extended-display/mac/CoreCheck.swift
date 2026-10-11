@@ -33,6 +33,38 @@ struct CoreCheck {
             precondition(fastAccepted == fps * 10, "A faster source must still obey the chosen limit")
         }
 
+        for fps in [30, 50, 60] {
+            var clock = FrameClock(origin: 10, fps: fps)
+            precondition(clock.tick(at: 9.99) == nil && clock.tick(at: .nan) == nil)
+            for slot in 0..<(fps * 10) {
+                let jitter = slot == 0 ? 0 : (slot % 2 == 0 ? 0.0001 : -0.0001)
+                let tick = clock.tick(at: 10 + Double(slot) / Double(fps) + jitter)!
+                precondition(tick.index == Int64(slot) && tick.skipped == 0)
+                precondition(clock.tick(at: 10 + Double(slot) / Double(fps) + 0.0002) == nil)
+            }
+            let late = clock.tick(at: 20.5)!
+            precondition(late.index == Int64(floor(10.5 * Double(fps) + 0.0005 * Double(fps))))
+            precondition(late.skipped > 0 && clock.tick(at: 20.501) == nil, "Late clocks must skip, never burst")
+            precondition(clock.tick(at: 20) == nil)
+        }
+
+        // A count of 60 emissions is insufficient if capture-boundary races
+        // replace fresh updates with repeats. Keep all 600 jittered source frames.
+        let margin = FrameClock.captureMargin(sourceFPS: 60, outputFPS: 60)
+        var samplingClock = FrameClock(origin: margin, fps: 60)
+        var sourceIndex = -1
+        for slot in 0..<600 {
+            let now = margin + Double(slot) / 60 + (slot % 2 == 0 ? 0.0001 : -0.0001)
+            precondition(samplingClock.tick(at: now)?.index == Int64(slot))
+            while sourceIndex + 1 < 600 {
+                let next = sourceIndex + 1
+                let arrival = Double(next) / 60 + (next % 2 == 0 ? 0.0015 : -0.0015)
+                if arrival > now { break }
+                sourceIndex = next
+            }
+            precondition(sourceIndex == slot, "Sampling phase must retain every fresh 60 Hz update")
+        }
+
         var cadence = FrameCadence()
         var latency = FrameLatency()
         precondition(latency.p95MS == nil)

@@ -2,7 +2,7 @@ import Foundation
 
 /// Numeric diagnostics only. Capture/encoder queues never serialize JSON or write files.
 final class StreamJournal: @unchecked Sendable {
-    enum Event: String { case capture, encode, encoded, send, admission, replaced, codecDrop, sample, tvReport, tvFrame, stop }
+    enum Event: String { case capture, pace, encode, encoded, send, admission, replaced, codecDrop, sample, tvReport, tvFrame, stop }
     static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("METZ/StreamSessions.noindex", isDirectory: true)

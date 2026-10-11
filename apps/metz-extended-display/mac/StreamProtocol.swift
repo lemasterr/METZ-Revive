@@ -52,6 +52,29 @@ struct FrameRateSelector {
     }
 }
 
+/// One slot per presentation deadline. A late callback skips slots, never replays them.
+struct FrameClock {
+    struct Tick { let index: Int64; let skipped: Int64; let lateMS: Double }
+    let origin: Double
+    let fps: Int
+    private var previous: Int64 = -1
+    static func captureMargin(sourceFPS: Int, outputFPS: Int) -> Double {
+        0.5 / Double(max(1, max(sourceFPS, outputFPS)))
+    }
+    init(origin: Double, fps: Int) { self.origin = origin; self.fps = fps }
+    mutating func tick(at now: Double) -> Tick? {
+        guard origin.isFinite, now.isFinite, fps > 0, now >= origin else { return nil }
+        let slot = floor((now - origin + 0.0005) * Double(fps))
+        guard slot < Double(Int64.max), slot >= 0 else { return nil }
+        let index = Int64(slot)
+        guard index > previous else { return nil }
+        let skipped = index - previous - 1
+        previous = index
+        return Tick(index: index, skipped: skipped,
+            lateMS: max(0, now - origin - Double(index) / Double(fps)) * 1000)
+    }
+}
+
 /// A bounded window of actual intervals; absent samples never become zero.
 struct FrameCadence {
     private var previous: Double?

@@ -314,7 +314,7 @@ final class ConnectionManager: ObservableObject {
             let refresh = CGDisplayCopyDisplayMode(id)?.refreshRate ?? 0
             sourceRefresh = refresh > 0 && refresh.isFinite ? refresh : nil
             let encoder = try FramePipeline(transport: transport, mode: mode, audio: audio,
-                sourceFPS: sourceRefresh.map { Int($0.rounded()) } ?? 60, journal: journal)
+                sourceFPS: sourceRefresh.map { Int($0.rounded()) } ?? 60, journal: journal, paced: true)
             pipeline = encoder
             let failure: (String) -> Void = { [weak self] reason in Task { @MainActor in
                 guard let self, self.token == current else { return }
@@ -376,7 +376,7 @@ final class ConnectionManager: ObservableObject {
                     fields["capture_complete"] = Double(frames.complete); fields["capture_idle"] = Double(frames.idle)
                     fields["capture_other"] = Double(frames.other)
                     self.journal?.record(.sample, fields)
-                    self.processingStatistics = "Видеопоток, кодирование: \(fps(encodedMbps)) Мбит/с\nКодирование, p95: \(fps(snapshot.encoderLatency.p95MS)) мс · подтверждение ТВ, p95: \(fps(snapshot.admissionLatency.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(snapshot.codecFrames)\nВыбрано лимитом \(self.configuredMode.fps): \(snapshot.selected) · исключено лимитом: \(snapshot.selectionSkipped)"
+                    self.processingStatistics = "Видеопоток, кодирование: \(fps(encodedMbps)) Мбит/с\nКодирование, p95: \(fps(snapshot.encoderLatency.p95MS)) мс · подтверждение ТВ, p95: \(fps(snapshot.admissionLatency.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(snapshot.codecFrames)\nПланировщик \(self.configuredMode.fps): новых кадров захвата \(snapshot.freshEncoded) · повторов \(snapshot.repeatedEncoded)\nПропущено тактов: \(snapshot.pacingSkipped) · обновлений объединено: \(snapshot.selectionSkipped)"
                     if self.journal?.available != true { self.processingStatistics += "\nЖурнал сеанса недоступен" }
                 }
             }

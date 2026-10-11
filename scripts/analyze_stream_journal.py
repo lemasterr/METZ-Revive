@@ -41,7 +41,7 @@ def analyze(summary_path):
         except (ValueError, KeyError, TypeError):
             continue
         segments.append((segment, path))
-    samples, raw_wait, encode, send_wait, ack, decode = [], [], [], [], [], []
+    samples, raw_wait, encode, send_wait, ack, decode, pace_late = [], [], [], [], [], [], []
     stage_times = {0: [], 1: [], 2: []}
     input_times = {}
     trace_omitted = 0
@@ -63,7 +63,8 @@ def analyze(summary_path):
                 if event == "sample":
                     samples.append(record)
                 for kind, key, values in [("encode", "raw_wait_ms", raw_wait), ("encoded", "encode_ms", encode),
-                                          ("send", "wait_ms", send_wait), ("admission", "ack_ms", ack)]:
+                                          ("send", "wait_ms", send_wait), ("admission", "ack_ms", ack),
+                                          ("pace", "late_ms", pace_late)]:
                     value = number(record, key)
                     if event == kind and value is not None:
                         values.append(value)
@@ -96,7 +97,7 @@ def analyze(summary_path):
         return result
     timings = {}
     for key, values in [("raw_wait_ms", raw_wait), ("encode_ms", encode), ("send_wait_ms", send_wait),
-                        ("ack_ms", ack), ("decode_ms", decode)]:
+                        ("ack_ms", ack), ("decode_ms", decode), ("pace_late_ms", pace_late)]:
         timings[key] = {"p95": percentile(values), "max": max(values), "count": len(values)} if values else None
     for stage, name in [(0, "tv_input_interval_ms"), (1, "tv_output_interval_ms"), (2, "surface_interval_ms")]:
         ordered = sorted(stage_times[stage])
@@ -112,7 +113,8 @@ def analyze(summary_path):
         "tv_trace_omitted": trace_omitted, "damaged_lines": damaged_lines,
         "rates": rates_for(samples), "high_capture_rates": rates_for(high_capture), "timings": timings,
         "totals": {key: number(summary.get("last", {}), key) for key in
-                   ("capture_frames", "selected_frames", "selection_skipped", "raw_replaced", "codec_dropped", "admitted_frames")},
+                   ("capture_frames", "selected_frames", "selection_skipped", "raw_replaced", "codec_dropped", "admitted_frames",
+                    "fresh_selected", "repeated_selected", "fresh_encoded", "repeated_encoded", "pacing_skipped")},
         "worst_seconds": [{key: number(sample, key) for key in
                            ("t_ms", "capture_fps", "encoded_fps", "admission_fps", "output_fps", "video_mbps", "tv_report_age_s",
                             "capture_complete", "capture_idle", "capture_other",
