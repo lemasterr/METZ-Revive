@@ -9,10 +9,30 @@ import QuartzCore
 @MainActor
 private final class RuntimeMotionView: NSView {
     private(set) var tick = 0
-    func startMotion() {
+    func startMotion(pattern: String = "bar") {
         wantsLayer = true
         guard let layer, bounds.width > 120 else { return }
         layer.backgroundColor = NSColor.black.cgColor
+        if pattern == "grid" {
+            for row in 0..<6 { for column in 0..<10 {
+                let tile = CAGradientLayer()
+                let cell = CGSize(width: bounds.width / 10, height: bounds.height / 6)
+                tile.bounds = CGRect(origin: .zero, size: cell)
+                tile.position = CGPoint(x: (Double(column) + 0.5) * cell.width, y: (Double(row) + 0.5) * cell.height)
+                tile.colors = [NSColor(hue: CGFloat((row * 10 + column) % 13) / 13,
+                    saturation: 0.8, brightness: 0.9, alpha: 1).cgColor, NSColor.black.cgColor]
+                tile.startPoint = CGPoint(x: 0, y: 0); tile.endPoint = CGPoint(x: 1, y: 1)
+                layer.addSublayer(tile)
+                let movement = CABasicAnimation(keyPath: "transform.rotation.z")
+                movement.fromValue = 0; movement.toValue = Double.pi * 2
+                movement.duration = 2 + Double((row + column) % 4) / 3
+                movement.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+                movement.repeatCount = .greatestFiniteMagnitude
+                movement.timingFunction = CAMediaTimingFunction(name: .linear)
+                tile.add(movement, forKey: "runtimeGrid")
+            } }
+            return
+        }
         let bar = CALayer()
         bar.bounds = CGRect(x: 0, y: 0, width: 120, height: bounds.height)
         bar.position = CGPoint(x: 60, y: bounds.midY)
@@ -50,7 +70,16 @@ private final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDele
         lock.lock(); frameStates[status, default: 0] += 1; lock.unlock()
         guard status == SCFrameStatus.complete.rawValue,
             let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
-        pipeline.submit(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sample))
+        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+        // displayTime is mach absolute time, independently of the sample PTS epoch.
+        // Convert it explicitly; absent metadata must not become zero latency.
+        let delivery = (attachments.first?[.displayTime] as? NSNumber).flatMap { timestamp -> Double? in
+            guard timestamp.uint64Value > 0 else { return nil }
+            let displayed = CMClockMakeHostTimeFromSystemUnits(timestamp.uint64Value)
+            let seconds = CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), displayed).seconds
+            return seconds.isFinite && seconds >= 0 ? seconds : nil
+        }
+        pipeline.submit(buffer, pts: pts, deliverySeconds: delivery)
     }
     private func submitAudio(_ sample: CMSampleBuffer) {
         guard sample.isValid, let description = CMSampleBufferGetFormatDescription(sample),
@@ -327,10 +356,11 @@ final class ConnectionManager: ObservableObject {
             configuration.width = mode.width; configuration.height = mode.height
             // Keep the owned compositor at 60 Hz. Select fresh frames on one
             // timeline for lower stream rates, instead of stacking equal-rate throttles.
-            configuration.minimumFrameInterval = handle != nil ? .zero : CMTime(value: 1, timescale: Int32(mode.fps))
+            configuration.minimumFrameInterval = CMTime(value: 1, timescale: Int32(handle != nil ? 60 : mode.fps))
             configuration.queueDepth = 5; configuration.showsCursor = true
-            // Use the conservative capture format; hardware AVC performs conversion.
-            configuration.pixelFormat = kCVPixelFormatType_32BGRA
+            // Capture in the hardware encoder's native YUV format, avoiding retained
+            // full-size RGB surfaces and a separate RGB conversion for every encode.
+            configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             configuration.capturesAudio = audio
             configuration.sampleRate = 48000; configuration.channelCount = 2
             configuration.excludesCurrentProcessAudio = true
@@ -376,7 +406,7 @@ final class ConnectionManager: ObservableObject {
                     fields["capture_complete"] = Double(frames.complete); fields["capture_idle"] = Double(frames.idle)
                     fields["capture_other"] = Double(frames.other)
                     self.journal?.record(.sample, fields)
-                    self.processingStatistics = "Видеопоток, кодирование: \(fps(encodedMbps)) Мбит/с\nКодирование, p95: \(fps(snapshot.encoderLatency.p95MS)) мс · подтверждение ТВ, p95: \(fps(snapshot.admissionLatency.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(snapshot.codecFrames)\nПланировщик \(self.configuredMode.fps): новых кадров захвата \(snapshot.freshEncoded) · повторов \(snapshot.repeatedEncoded)\nПропущено тактов: \(snapshot.pacingSkipped) · обновлений объединено: \(snapshot.selectionSkipped)"
+                    self.processingStatistics = "Видеопоток, кодирование: \(fps(encodedMbps)) Мбит/с\nКодирование, p95: \(fps(snapshot.encoderLatency.p95MS)) мс · доставка захвата, p95: \(fps(snapshot.captureDelivery.p95MS)) мс · подтверждение ТВ, p95: \(fps(snapshot.admissionLatency.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(snapshot.codecFrames)\nПланировщик \(self.configuredMode.fps): новых кадров захвата \(snapshot.freshEncoded) · повторов \(snapshot.repeatedEncoded)\nПропущено тактов: \(snapshot.pacingSkipped) · обновлений объединено: \(snapshot.selectionSkipped)"
                     if self.journal?.available != true { self.processingStatistics += "\nЖурнал сеанса недоступен" }
                 }
             }
@@ -508,7 +538,7 @@ final class ConnectionManager: ObservableObject {
                 window.contentView = view
                 window.orderFrontRegardless(); testWindow = window
                 window.setFrameOrigin(NSPoint(x: screen.frame.minX + 40, y: screen.frame.minY + 40))
-                view.startMotion()
+                view.startMotion(pattern: config["stimulus"] == "grid" ? "grid" : "bar")
                 let motion = screen.displayLink(target: view, selector: #selector(RuntimeMotionView.advance(_:)))
                 let stimulusFPS = 60
                 motion.preferredFrameRateRange = CAFrameRateRange(minimum: Float(stimulusFPS), maximum: Float(stimulusFPS), preferred: Float(stimulusFPS))
@@ -595,7 +625,7 @@ final class ConnectionManager: ObservableObject {
                 checkpoint(["runs": runs, "cycle": cycle, "stopped": true])
                 try await Task.sleep(nanoseconds: 1_000_000_000)
             }
-            let report: [String: Any] = ["runs": runs, "capture_scope": "owned virtual display with generated moving bar", "stimulus": "Core Animation moving layer; display link counts clock callbacks only", "audio": withAudio]
+            let report: [String: Any] = ["runs": runs, "capture_scope": "owned virtual display with generated moving bar", "stimulus": config["stimulus"] == "grid" ? "generated rotating gradient grid" : "Core Animation moving layer; display link counts clock callbacks only", "audio": withAudio]
             let destination = configuration.deletingLastPathComponent().appendingPathComponent("runtime-report-\(UUID().uuidString).json")
             let saved = FileManager.default.createFile(atPath: destination.path,
                 contents: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted]), attributes: [.posixPermissions: 0o600])

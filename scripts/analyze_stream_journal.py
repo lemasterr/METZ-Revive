@@ -41,7 +41,7 @@ def analyze(summary_path):
         except (ValueError, KeyError, TypeError):
             continue
         segments.append((segment, path))
-    samples, raw_wait, encode, send_wait, ack, decode, pace_late = [], [], [], [], [], [], []
+    samples, raw_wait, encode, send_wait, ack, decode, pace_late, capture_delivery = [], [], [], [], [], [], [], []
     stage_times = {0: [], 1: [], 2: []}
     input_times = {}
     trace_omitted = 0
@@ -64,7 +64,7 @@ def analyze(summary_path):
                     samples.append(record)
                 for kind, key, values in [("encode", "raw_wait_ms", raw_wait), ("encoded", "encode_ms", encode),
                                           ("send", "wait_ms", send_wait), ("admission", "ack_ms", ack),
-                                          ("pace", "late_ms", pace_late)]:
+                                          ("pace", "late_ms", pace_late), ("capture", "delivery_ms", capture_delivery)]:
                     value = number(record, key)
                     if event == kind and value is not None:
                         values.append(value)
@@ -97,7 +97,7 @@ def analyze(summary_path):
         return result
     timings = {}
     for key, values in [("raw_wait_ms", raw_wait), ("encode_ms", encode), ("send_wait_ms", send_wait),
-                        ("ack_ms", ack), ("decode_ms", decode), ("pace_late_ms", pace_late)]:
+                        ("ack_ms", ack), ("decode_ms", decode), ("pace_late_ms", pace_late), ("capture_delivery_ms", capture_delivery)]:
         timings[key] = {"p95": percentile(values), "max": max(values), "count": len(values)} if values else None
     for stage, name in [(0, "tv_input_interval_ms"), (1, "tv_output_interval_ms"), (2, "surface_interval_ms")]:
         ordered = sorted(stage_times[stage])

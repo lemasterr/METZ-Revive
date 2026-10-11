@@ -3,6 +3,37 @@ package com.metzrevive.display
 import java.nio.ByteBuffer
 
 fun main() {
+    val requested = mutableListOf<Boolean>()
+    check(DecoderSetup.create({ true }) { low -> requested.add(low); if (low) error("unsupported") else 7 } == 7)
+    check(requested == listOf(true, false))
+    requested.clear()
+    check(DecoderSetup.create({ true }) { low -> requested.add(low); 8 } == 8 && requested == listOf(true))
+    requested.clear()
+    check(runCatching { DecoderSetup.create({ false }) { low -> requested.add(low); error("stopped") } }.isFailure)
+    check(requested == listOf(true))
+    val blocked = java.util.concurrent.CountDownLatch(1)
+    val release = java.util.concurrent.CountDownLatch(1)
+    val delivered = java.util.Collections.synchronizedList(mutableListOf<Int>())
+    val writer = ReceiptWriter({ packet ->
+        blocked.countDown(); release.await(2, java.util.concurrent.TimeUnit.SECONDS)
+        delivered.add(packet[0].toInt())
+    }, { error("unexpected writer failure") })
+    writer.offer(byteArrayOf(0))
+    check(blocked.await(1, java.util.concurrent.TimeUnit.SECONDS))
+    // A blocked socket must not block the caller; queue capacity is exact and bounded.
+    for (i in 1..32) writer.offer(byteArrayOf(i.toByte()))
+    check(runCatching { writer.offer(byteArrayOf(33)) }.isFailure)
+    release.countDown()
+    val writerDeadline = System.nanoTime() + 2_000_000_000L
+    while (delivered.size < 33 && System.nanoTime() < writerDeadline) Thread.sleep(1)
+    check(delivered.toList() == (0..32).toList())
+    writer.close(); check(writer.awaitClosed(1000))
+    check(runCatching { writer.offer(byteArrayOf(1)) }.isFailure)
+    val writeFailure = java.util.concurrent.CountDownLatch(1)
+    val broken = ReceiptWriter({ throw java.io.IOException("fixture") }, { writeFailure.countDown() })
+    broken.offer(byteArrayOf(1)); check(writeFailure.await(1, java.util.concurrent.TimeUnit.SECONDS))
+    broken.close(); check(broken.awaitClosed(1000))
+    println("Receipt writer order/bounded nonblocking admission/failure/stop and low-latency setup fallback passed")
     val telemetry = FrameTelemetry(0)
     telemetry.output(); telemetry.output()
     telemetry.rendered(0, 10); telemetry.rendered(0, 11); telemetry.rendered(1, 12)

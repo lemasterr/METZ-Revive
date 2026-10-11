@@ -24,7 +24,7 @@ struct FramePipelineSnapshot {
     let freshSelected, repeatedSelected, pacingSkipped: Int
     let freshEncoded, repeatedEncoded: Int
     let capture, admission: FrameCadence
-    let rawQueue, encoderLatency, admissionLatency: FrameLatency
+    let rawQueue, encoderLatency, admissionLatency, captureDelivery: FrameLatency
     var numbers: [String: Double] {
         var result = ["capture_frames": Double(captured), "selected_frames": Double(selected),
             "selection_skipped": Double(selectionSkipped), "raw_replaced": Double(replaced),
@@ -36,7 +36,8 @@ struct FramePipelineSnapshot {
             "capture_long_gaps": Double(capture.longGaps), "admission_long_gaps": Double(admission.longGaps)]
         for (name, value) in [("capture_p95_ms", capture.p95MS), ("capture_max_ms", capture.maximumMS),
             ("admission_p95_ms", admission.p95MS), ("admission_max_ms", admission.maximumMS),
-            ("raw_queue_p95_ms", rawQueue.p95MS), ("encode_p95_ms", encoderLatency.p95MS),
+            ("raw_queue_p95_ms", rawQueue.p95MS), ("capture_delivery_p95_ms", captureDelivery.p95MS),
+            ("encode_p95_ms", encoderLatency.p95MS),
             ("ack_p95_ms", admissionLatency.p95MS)] {
             if let value { result[name] = value }
         }
@@ -90,6 +91,7 @@ final class FramePipeline: @unchecked Sendable {
     private var rawQueue = FrameLatency()
     private var encoderLatency = FrameLatency()
     private var admissionLatency = FrameLatency()
+    private var captureDelivery = FrameLatency()
     private var captureCadence = FrameCadence()
     private var admissionCadence = FrameCadence()
     private var dropped = 0
@@ -109,7 +111,7 @@ final class FramePipeline: @unchecked Sendable {
             freshSelected: freshSelected, repeatedSelected: repeatedSelected, pacingSkipped: pacingSkipped,
             freshEncoded: freshEncoded, repeatedEncoded: repeatedEncoded,
             capture: captureCadence, admission: admissionCadence,
-            rawQueue: rawQueue, encoderLatency: encoderLatency, admissionLatency: admissionLatency)
+            rawQueue: rawQueue, encoderLatency: encoderLatency, admissionLatency: admissionLatency, captureDelivery: captureDelivery)
     }
     var timing: (FrameCadence, FrameCadence) { lock.lock(); defer { lock.unlock() }; return (captureCadence, admissionCadence) }
     var processing: (frames: Int, bytes: Int, rawQueue: FrameLatency, encoder: FrameLatency, admission: FrameLatency) {
@@ -163,18 +165,23 @@ final class FramePipeline: @unchecked Sendable {
         } catch { VTCompressionSessionInvalidate(session); self.session = nil; throw error }
     }
 
-    func submit(_ buffer: CVPixelBuffer, pts: CMTime) {
+    func submit(_ buffer: CVPixelBuffer, pts: CMTime, deliverySeconds: Double? = nil) {
         guard pts.isValid, pts.isNumeric, CVPixelBufferGetWidth(buffer) == mode.width,
               CVPixelBufferGetHeight(buffer) == mode.height else { return }
         lock.lock()
         guard !stopped else { lock.unlock(); return }
         if paced, let latest = latestCapture, pts <= latest.pts { lock.unlock(); return }
         captured += 1
+        if let deliverySeconds { captureDelivery.record(seconds: deliverySeconds) }
         captureCadence.record(pts.seconds, expectedFPS: sourceFPS)
         if captureOrigin == nil { captureOrigin = pts }
         if paced {
-            journal?.record(.capture, ["frame": Double(captured),
-                "source_pts_us": CMTimeSubtract(pts, captureOrigin!).seconds * 1_000_000])
+            var captureFields = ["frame": Double(captured),
+                "source_pts_us": CMTimeSubtract(pts, captureOrigin!).seconds * 1_000_000]
+            if let deliverySeconds, deliverySeconds.isFinite, deliverySeconds >= 0 {
+                captureFields["delivery_ms"] = deliverySeconds * 1000
+            }
+            journal?.record(.capture, captureFields)
             // Keep only the newest source surface, including while transmission is blocked.
             if let previous = latestCapture, previous.source != selectedSource { selectionSkipped += 1 }
             latestCapture = (buffer, pts, captured)

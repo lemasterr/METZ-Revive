@@ -1,8 +1,6 @@
 package com.metzrevive.display
 
 import android.media.MediaCodec
-import android.media.MediaCodecInfo
-import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.util.Base64
 import android.view.Surface
@@ -42,11 +40,14 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
     @Volatile private var decodeHandler: android.os.Handler? = null
     private val decoderClosing = java.util.concurrent.atomic.AtomicBoolean(false)
     private val inputBuffers = java.util.ArrayDeque<Int>()
-    private val receiptLock = Any()
+    @Volatile private var receipts: ReceiptWriter? = null
     private var packetStage = 1
     private val keyframePending = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    private fun receipt(value: Int) = synchronized(receiptLock) { socket?.outputStream?.write(value); Unit }
+    private fun sendReceipt(bytes: ByteArray) {
+        (receipts ?: throw java.io.IOException("Receipt writer unavailable")).offer(bytes)
+    }
+    private fun receipt(value: Int) = sendReceipt(byteArrayOf(value.toByte()))
     fun requestKeyframe() {
         if (!active || socket == null || !keyframePending.compareAndSet(false, true)) return
         Thread({
@@ -94,6 +95,12 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
                         continue
                     }
                     lastError = ""
+                    receipts = ReceiptWriter({ bytes -> accepted.outputStream.write(bytes) }, {
+                        if (active) {
+                            recordFailure("RECEIPT_IO")
+                            stop(); status("Подтверждения ТВ не отправляются. Повторите подключение.")
+                        }
+                    })
                     receipt(0x52) // This receiver supports decoder admission acknowledgements.
                     status("Подключено · второй экран")
                     receive(DataInputStream(accepted.inputStream))
@@ -118,13 +125,15 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
             catch (_: Exception) {
                 if (active) {
                     recordFailure("STREAM_FORMAT_STAGE_$packetStage")
-                    runCatching { synchronized(receiptLock) { socket?.outputStream?.write(byteArrayOf(0xE4.toByte(), packetStage.toByte())) } }
+                    runCatching { sendReceipt(byteArrayOf(0xE4.toByte(), packetStage.toByte())) }
                 }
                 completion = "Поток остановлен (формат, этап $packetStage). Повторите подключение."
             }
             finally {
                 val notify = active
+                val retiringReceipts = receipts
                 stop()
+                retiringReceipts?.let { runCatching { it.awaitClosed(3000) } }
                 // Ensure the button sees isRunning=false; decoder release may still be settling.
                 if (notify) status(completion)
                 decoding?.let {
@@ -206,21 +215,22 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
         require(!frameTraceEnabled || reportsEnabled)
         telemetry.enableTrace(frameTraceEnabled)
         val info = StreamModes.decoder(mode) ?: error("Hardware AVC mode unavailable")
-        val format = MediaFormat.createVideoFormat("video/avc", mode.width, mode.height).apply {
+        fun format(lowLatency: Boolean) = MediaFormat.createVideoFormat("video/avc", mode.width, mode.height).apply {
             setByteBuffer("csd-0", ByteBuffer.wrap(sps)); setByteBuffer("csd-1", ByteBuffer.wrap(pps))
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, StreamProtocol.MAX_PAYLOAD + 8192)
             // Declare real-time demand to the codec resource planner; no manual clock changes.
             setInteger(MediaFormat.KEY_PRIORITY, 0)
             setInteger(MediaFormat.KEY_FRAME_RATE, mode.fps)
             setFloat(MediaFormat.KEY_OPERATING_RATE, mode.fps.toFloat())
-            if (info.getCapabilitiesForType("video/avc").isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency))
-                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            // Request the standard Android option even if the vendor omits its feature bit.
+            // Configuration/start rejection retries once with the unchanged baseline format.
+            // Acceptance is not evidence of low latency: only the PTS trace can prove a gain.
+            if (lowLatency) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
         if (config.optBoolean("audio", false)) {
             val sink = runCatching { StreamAudio() }.getOrElse { throw StreamAudioFailure() }
             synchronized(audioLock) { if (active) audio = sink else { sink.close(); error("Session stopped") } }
         }
-        val decoder = MediaCodec.createByCodecName(info.name)
         val thread = android.os.HandlerThread("metz-decoder", android.os.Process.THREAD_PRIORITY_DISPLAY).apply { start() }
         decoding = thread
         val handler = android.os.Handler(thread.looper)
@@ -230,39 +240,52 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
         handler.post {
             try {
                 check(active)
-                codec = decoder
-                decoder.setCallback(object : MediaCodec.Callback() {
-                    override fun onInputBufferAvailable(owner: MediaCodec, index: Int) {
-                        if (!active || codec !== owner) return
-                        try { inputBuffers.addLast(index); feedDecoder() }
-                        catch (error: Exception) { decoderFailed(error) }
-                    }
-                    override fun onOutputBufferAvailable(owner: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                        if (!active || codec !== owner) return
-                        try {
-                            telemetry.output(info.presentationTimeUs)
-                            owner.releaseOutputBuffer(index, true)
-                            if (firstFrame) {
-                                firstFrame = false; receipt(0x50)
-                                android.util.Log.i("METZStream", "FIRST_FRAME_DECODED")
+                DecoderSetup.create({ active }) { lowLatency ->
+                    check(active)
+                    val decoder = MediaCodec.createByCodecName(info.name)
+                    try {
+                        codec = decoder
+                        decoder.setCallback(object : MediaCodec.Callback() {
+                            override fun onInputBufferAvailable(owner: MediaCodec, index: Int) {
+                                if (!active || codec !== owner) return
+                                try { inputBuffers.addLast(index); feedDecoder() }
+                                catch (error: Exception) { decoderFailed(error) }
                             }
-                            reportFrames()
-                        } catch (error: Exception) { decoderFailed(error) }
+                            override fun onOutputBufferAvailable(owner: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                                if (!active || codec !== owner) return
+                                try {
+                                    telemetry.output(info.presentationTimeUs)
+                                    // Let Surface discard older unshown frames during catch-up.
+                                    // All compressed references have still been decoded.
+                                    owner.releaseOutputBuffer(index, System.nanoTime())
+                                    if (firstFrame) {
+                                        firstFrame = false; receipt(0x50)
+                                        android.util.Log.i("METZStream", "FIRST_FRAME_DECODED")
+                                    }
+                                    reportFrames()
+                                } catch (error: Exception) { decoderFailed(error) }
+                            }
+                            override fun onOutputFormatChanged(owner: MediaCodec, format: MediaFormat) = Unit
+                            override fun onError(owner: MediaCodec, error: MediaCodec.CodecException) {
+                                if (active && codec === owner) decoderFailed(error)
+                            }
+                        }, handler)
+                        decoder.configure(format(lowLatency), surface, null, 0)
+                        decoder.setOnFrameRenderedListener({ owner, pts, nanoTime ->
+                            if (active && codec === owner) telemetry.rendered(pts, nanoTime)
+                        }, renderHandler)
+                        decoder.start()
+                        android.util.Log.i("METZStream", if (lowLatency) "LOW_LATENCY_REQUESTED" else "LOW_LATENCY_CONFIG_FALLBACK")
+                        decoder
+                    } catch (error: Exception) {
+                        codec = null; inputBuffers.clear()
+                        runCatching { decoder.release() }
+                        throw error
                     }
-                    override fun onOutputFormatChanged(owner: MediaCodec, format: MediaFormat) = Unit
-                    override fun onError(owner: MediaCodec, error: MediaCodec.CodecException) {
-                        if (active && codec === owner) decoderFailed(error)
-                    }
-                }, handler)
-                decoder.configure(format, surface, null, 0)
-                decoder.setOnFrameRenderedListener({ _, pts, nanoTime ->
-                    if (active) telemetry.rendered(pts, nanoTime)
-                }, renderHandler)
-                decoder.start()
+                }
             } catch (error: Exception) {
                 failure = error; codec = null
                 decoderClosing.set(true)
-                runCatching { decoder.release() }
                 decodeHandler = null; thread.quitSafely()
             } finally { configured.countDown() }
         }
@@ -284,7 +307,7 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
                 buffer.put(frame.bytes)
                 decoder.queueInputBuffer(index, 0, frame.bytes.size, frame.pts, 0)
                 telemetry.admitted(frame.pts)
-                synchronized(receiptLock) { socket?.outputStream?.write(StreamProtocol.admissionReceipt(frame.pts)) }
+                sendReceipt(StreamProtocol.admissionReceipt(frame.pts))
             }
         } catch (error: Exception) { decoderFailed(error) }
     }
@@ -299,7 +322,7 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
         if (!active || !reportsEnabled || now - lastReportNS < 1_000_000_000L) return
         lastReportNS = now
         val report = telemetry.report(now) + (telemetry.takeTrace() ?: ByteArray(0))
-        synchronized(receiptLock) { socket?.outputStream?.write(report) }
+        sendReceipt(report)
     }
     private class FrameBackpressureTimeout : Exception()
     private fun recordFailure(code: String) {
@@ -312,6 +335,7 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
         listening = false
         runCatching { socket?.close() }; socket = null
         runCatching { server?.close() }; server = null
+        receipts?.close()
         frames.clear()
         synchronized(audioLock) { audio?.close(); audio = null }
         val handler = decodeHandler

@@ -17,8 +17,8 @@ cat > build/'METZ Manager.app'/Contents/Info.plist <<'PLIST'
 <key>CFBundleIdentifier</key><string>com.metzrevive.manager</string>
 <key>CFBundleName</key><string>METZ Manager</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.9.7</string>
-<key>CFBundleVersion</key><string>21</string>
+<key>CFBundleShortVersionString</key><string>0.9.8</string>
+<key>CFBundleVersion</key><string>22</string>
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>NSLocalNetworkUsageDescription</key><string>Подключение к выбранному телевизору METZ: управление и второй экран.</string>
 <key>NSHighResolutionCapable</key><true/>

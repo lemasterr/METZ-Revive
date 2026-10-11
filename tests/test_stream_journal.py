@@ -66,7 +66,8 @@ class StreamJournalAnalysisCheck(unittest.TestCase):
                 "capture_frames": 25, "fresh_encoded": 25, "repeated_encoded": 35, "pacing_skipped": 2}}))
             lines = [{"event": "start", "segment": 0},
                      {"event": "sample", "capture_fps": 25, "admission_fps": 60, "interval_s": 1},
-                     {"event": "pace", "late_ms": 1.5}, {"event": "pace", "late_ms": 5}]
+                     {"event": "pace", "late_ms": 1.5}, {"event": "pace", "late_ms": 5},
+                     {"event": "capture", "delivery_ms": 3.25}]
             (root / "session-fixture-0.jsonl").write_text("\n".join(json.dumps(line) for line in lines))
             result = journal.analyze(summary)
             self.assertEqual(result["rates"]["capture_fps"]["mean"], 25)
@@ -74,6 +75,7 @@ class StreamJournalAnalysisCheck(unittest.TestCase):
             self.assertEqual(result["totals"]["repeated_encoded"], 35)
             self.assertEqual(result["totals"]["pacing_skipped"], 2)
             self.assertEqual(result["timings"]["pace_late_ms"]["max"], 5)
+            self.assertEqual(result["timings"]["capture_delivery_ms"]["p95"], 3.25)
 
 
 if __name__ == "__main__":
