@@ -8,6 +8,21 @@ fun main() {
     telemetry.rendered(0, 10); telemetry.rendered(0, 11); telemetry.rendered(1, 12)
     val metrics = java.nio.ByteBuffer.wrap(telemetry.report(1_000_000_000))
     check(metrics.get().toInt() == 0x54 && metrics.long == 2L && metrics.long == 2L && metrics.long == 1_000_000L)
+    check(telemetry.takeTrace() == null) // Old senders get no new receipt type.
+    val detailed = FrameTelemetry(0)
+    detailed.enableTrace(true)
+    detailed.admitted(1234, 100_000); detailed.output(1234, 400_000)
+    detailed.rendered(1234, 900_000)
+    val trace = ByteBuffer.wrap(checkNotNull(detailed.takeTrace()))
+    check(trace.get().toInt() == 0x55 && trace.int == 8 + 3 * 24 && trace.long == 0L)
+    for ((stage, time) in listOf(0L to 100L, 1L to 400L, 2L to 900L)) {
+        check(trace.long == stage && trace.long == 1234L && trace.long == time)
+    }
+    check(!trace.hasRemaining() && detailed.takeTrace() == null)
+    for (frame in 0..299) detailed.admitted(frame.toLong(), frame.toLong() * 1000)
+    val bounded = ByteBuffer.wrap(checkNotNull(detailed.takeTrace()))
+    check(bounded.get().toInt() == 0x55 && bounded.int == 8 + 256 * 24 && bounded.long == 44L)
+    check(bounded.long == 0L && bounded.long == 44L && bounded.long == 44L)
     val session = VideoSessionGate()
     val motion = VideoSessionParameters(1366, 768, 60, 7, false)
     check(VideoSessionGate().accept(motion.copy(fps = 50)))

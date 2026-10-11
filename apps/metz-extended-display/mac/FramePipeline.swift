@@ -19,16 +19,37 @@ enum SessionAudioTime {
     }
 }
 
+struct FramePipelineSnapshot {
+    let captured, selected, selectionSkipped, replaced, codecDropped, admitted, codecFrames, bytes, audioPackets: Int
+    let capture, admission: FrameCadence
+    let rawQueue, encoderLatency, admissionLatency: FrameLatency
+    var numbers: [String: Double] {
+        var result = ["capture_frames": Double(captured), "selected_frames": Double(selected),
+            "selection_skipped": Double(selectionSkipped), "raw_replaced": Double(replaced),
+            "codec_dropped": Double(codecDropped), "admitted_frames": Double(admitted),
+            "encoded_frames": Double(codecFrames), "video_bytes": Double(bytes), "audio_submitted": Double(audioPackets),
+            "capture_long_gaps": Double(capture.longGaps), "admission_long_gaps": Double(admission.longGaps)]
+        for (name, value) in [("capture_p95_ms", capture.p95MS), ("capture_max_ms", capture.maximumMS),
+            ("admission_p95_ms", admission.p95MS), ("admission_max_ms", admission.maximumMS),
+            ("raw_queue_p95_ms", rawQueue.p95MS), ("encode_p95_ms", encoderLatency.p95MS),
+            ("ack_p95_ms", admissionLatency.p95MS)] {
+            if let value { result[name] = value }
+        }
+        return result
+    }
+}
+
 final class FramePipeline: @unchecked Sendable {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "metz.stream.encoder", qos: .userInteractive)
     private var session: VTCompressionSession?
-    private var pending: (CVPixelBuffer, CMTime, Double)?
+    private var pending: (CVPixelBuffer, CMTime, Double, Int)?
     // Encoder and transmission overlap, but compressed reference frames remain ordered.
     // At most one encode, one queued packet and two transmissions can exist.
     private var encoding = false // encoder queue only
     private var sending = 0 // encoder queue only
-    private var queuedPacket: (Data, UInt64)? // encoder queue only
+    private var queuedPacket: (Data, UInt64, Int, Double)? // encoder queue only
+    private var encodingFrameID = 0
     private var encodingBegan = 0.0
     private var stopped = false
     private var basePTS: CMTime?
@@ -37,7 +58,13 @@ final class FramePipeline: @unchecked Sendable {
     private var encoded = 0
     private var captured = 0
     private var frameSelector = FrameRateSelector()
-    private let paceFrames: Bool
+    private let sourceFPS: Int
+    private let journal: StreamJournal?
+    private var captureOrigin: CMTime?
+    private var selected = 0
+    private var selectionSkipped = 0
+    private var replaced = 0
+    private var codecDropped = 0
     private var audioSubmitted = 0
     private var codecFrames = 0
     private var videoBytes = 0
@@ -55,14 +82,23 @@ final class FramePipeline: @unchecked Sendable {
     var counts: (Int, Int) { lock.lock(); defer { lock.unlock() }; return (encoded, dropped) }
     var capturedCount: Int { lock.lock(); defer { lock.unlock() }; return captured }
     var audioPacketCount: Int { lock.lock(); defer { lock.unlock() }; return audioSubmitted }
+    var snapshot: FramePipelineSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        return FramePipelineSnapshot(captured: captured, selected: selected, selectionSkipped: selectionSkipped,
+            replaced: replaced, codecDropped: codecDropped, admitted: encoded, codecFrames: codecFrames,
+            bytes: videoBytes, audioPackets: audioSubmitted, capture: captureCadence, admission: admissionCadence,
+            rawQueue: rawQueue, encoderLatency: encoderLatency, admissionLatency: admissionLatency)
+    }
     var timing: (FrameCadence, FrameCadence) { lock.lock(); defer { lock.unlock() }; return (captureCadence, admissionCadence) }
     var processing: (frames: Int, bytes: Int, rawQueue: FrameLatency, encoder: FrameLatency, admission: FrameLatency) {
         lock.lock(); defer { lock.unlock() }; return (codecFrames, videoBytes, rawQueue, encoderLatency, admissionLatency)
     }
 
-    init(transport: FramePacketTransport, mode: StreamMode = .conservative, audio: Bool = false, paceFrames: Bool = false) throws {
+    init(transport: FramePacketTransport, mode: StreamMode = .conservative, audio: Bool = false,
+         sourceFPS: Int = 60, journal: StreamJournal? = nil) throws {
         guard mode.valid else { throw StreamError.invalid }
-        self.transport = transport; self.mode = mode; self.audio = audio; self.paceFrames = paceFrames
+        self.transport = transport; self.mode = mode; self.audio = audio
+        self.sourceFPS = max(1, sourceFPS); self.journal = journal
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(mode.width), height: Int32(mode.height),
             codecType: kCMVideoCodecType_H264,
@@ -108,10 +144,18 @@ final class FramePipeline: @unchecked Sendable {
         lock.lock()
         guard !stopped else { lock.unlock(); return }
         captured += 1
-        captureCadence.record(pts.seconds, expectedFPS: mode.fps)
-        if paceFrames && !frameSelector.accepts(pts.seconds, fps: mode.fps) { lock.unlock(); return }
-        if pending != nil { dropped += 1 }
-        pending = (buffer, pts, ProcessInfo.processInfo.systemUptime)
+        captureCadence.record(pts.seconds, expectedFPS: sourceFPS)
+        if captureOrigin == nil { captureOrigin = pts }
+        let accept = frameSelector.accepts(pts.seconds, fps: mode.fps)
+        journal?.record(.capture, ["frame": Double(captured),
+            "source_pts_us": CMTimeSubtract(pts, captureOrigin!).seconds * 1_000_000, "selected": accept ? 1 : 0])
+        if !accept { selectionSkipped += 1; lock.unlock(); return }
+        selected += 1
+        if let pending {
+            dropped += 1; replaced += 1
+            journal?.record(.replaced, ["frame": Double(pending.3), "by_frame": Double(captured)])
+        }
+        pending = (buffer, pts, ProcessInfo.processInfo.systemUptime, captured)
         lock.unlock()
         queue.async { self.encodeNext() }
     }
@@ -138,8 +182,11 @@ final class FramePipeline: @unchecked Sendable {
         forceIDR = false
         var flags: VTEncodeInfoFlags = []
         encoding = true
+        encodingFrameID = frame.3
         encodingBegan = ProcessInfo.processInfo.systemUptime
         lock.lock(); rawQueue.record(seconds: encodingBegan - frame.2); lock.unlock()
+        journal?.record(.encode, ["frame": Double(encodingFrameID),
+            "raw_wait_ms": (encodingBegan - frame.2) * 1000])
         let status = VTCompressionSessionEncodeFrame(session, imageBuffer: frame.0, presentationTimeStamp: pts,
             duration: CMTime(value: 1, timescale: Int32(mode.fps)), frameProperties: properties,
             sourceFrameRefcon: nil, infoFlagsOut: &flags)
@@ -154,7 +201,8 @@ final class FramePipeline: @unchecked Sendable {
         // VideoToolbox may drop a frame successfully under real-time load.
         // No compressed reference frame exists to send; continue with the latest raw frame.
         if result == .dropped {
-            lock.lock(); self.dropped += 1; lock.unlock()
+            lock.lock(); self.dropped += 1; codecDropped += 1; lock.unlock()
+            journal?.record(.codecDrop, ["frame": Double(encodingFrameID)])
             forceIDR = true
             encoding = false
             encodeNext()
@@ -190,7 +238,7 @@ final class FramePipeline: @unchecked Sendable {
                         let pointer, size > 0, size <= 4096 else { throw StreamError.invalid }
                     sets.append(Data([0, 0, 0, 1]) + Data(bytes: pointer, count: size))
                 }
-                let config: [String: Any] = ["width": mode.width, "height": mode.height, "fps": mode.fps, "profile": "baseline-" + mode.level, "audio": audio, "telemetry": true,
+                let config: [String: Any] = ["width": mode.width, "height": mode.height, "fps": mode.fps, "profile": "baseline-" + mode.level, "audio": audio, "telemetry": true, "frame_trace": journal != nil,
                     "sps": sets[0].base64EncodedString(), "pps": sets[1].base64EncodedString()]
                 packets.append(try Wire.packet(type: 1, epoch: epoch, payload: JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])))
             }
@@ -199,11 +247,14 @@ final class FramePipeline: @unchecked Sendable {
             guard us >= 0 else { throw StreamError.invalid }
             packets.append(try Wire.packet(type: 2, flags: key ? 1 : 0, epoch: epoch, pts: UInt64(us),
                 payload: Wire.annexB(avcc, nalLength: Int(nalLength))))
+            let completed = ProcessInfo.processInfo.systemUptime
             lock.lock(); codecFrames += 1; videoBytes += packets.count
-            encoderLatency.record(seconds: ProcessInfo.processInfo.systemUptime - encodingBegan)
+            encoderLatency.record(seconds: completed - encodingBegan)
             lock.unlock()
+            journal?.record(.encoded, ["frame": Double(encodingFrameID), "pts_us": Double(us),
+                "bytes": Double(packets.count), "encode_ms": (completed - encodingBegan) * 1000])
             encoding = false
-            queuedPacket = (packets, UInt64(us))
+            queuedPacket = (packets, UInt64(us), encodingFrameID, completed)
             sendNext()
             encodeNext()
         } catch { failed("Некорректный кадр H.264.") }
@@ -224,6 +275,8 @@ final class FramePipeline: @unchecked Sendable {
         queuedPacket = nil
         sending += 1
         let began = ProcessInfo.processInfo.systemUptime
+        journal?.record(.send, ["frame": Double(packet.2), "pts_us": Double(packet.1),
+            "wait_ms": (began - packet.3) * 1000, "credits_used": Double(sending)])
         transport.send(packet.0, pts: packet.1) { [weak self] success in
             guard let self else { return }
             self.queue.async {
@@ -233,6 +286,8 @@ final class FramePipeline: @unchecked Sendable {
                     self.encoded += 1
                     self.admissionCadence.record(ProcessInfo.processInfo.systemUptime, expectedFPS: self.mode.fps)
                     self.admissionLatency.record(seconds: ProcessInfo.processInfo.systemUptime - began)
+                    self.journal?.record(.admission, ["frame": Double(packet.2), "pts_us": Double(packet.1),
+                        "ack_ms": (ProcessInfo.processInfo.systemUptime - began) * 1000])
                 }
                 self.lock.unlock()
                 self.sending -= 1

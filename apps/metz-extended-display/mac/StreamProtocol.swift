@@ -110,6 +110,25 @@ struct TVFrameReport: Equatable {
     }
 }
 
+struct TVFrameTrace {
+    struct Frame { let stage, pts, elapsedUS: UInt64 }
+    static let maximumBytes = 8 + 256 * 24
+    let omitted: UInt64
+    let frames: [Frame]
+    static func parse(_ data: Data) throws -> Self {
+        guard data.count >= 8, data.count <= maximumBytes, (data.count - 8) % 24 == 0 else { throw StreamError.invalid }
+        func number(_ offset: Int) -> UInt64 {
+            data[offset..<(offset + 8)].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        }
+        let frames = try stride(from: 8, to: data.count, by: 24).map { offset -> Frame in
+            let stage = number(offset)
+            guard stage <= 2 else { throw StreamError.invalid }
+            return Frame(stage: stage, pts: number(offset + 8), elapsedUS: number(offset + 16))
+        }
+        return Self(omitted: number(0), frames: frames)
+    }
+}
+
 /// Network acceptance and decoder admission may arrive in either order.
 struct FrameDeliveryGate {
     let pts: UInt64

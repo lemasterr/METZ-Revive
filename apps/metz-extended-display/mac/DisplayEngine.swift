@@ -105,7 +105,11 @@ final class ConnectionManager: ObservableObject {
     @Published private(set) var outputFPS: Double?
     @Published private(set) var renderedFPS: Double?
     private var previousReport: TVFrameReport?
+    private var lastReportTime: Double?
+    private var journal: StreamJournal?
+    private var sourceRefresh: Double?
     private var previousSample: (time: Double, captured: Int, admitted: Int, bytes: Int)?
+    private var previousEncodedFrames = 0
     @Published private(set) var lastFailure = UserDefaults.standard.string(forKey: "displayLastFailure") ?? ""
     private var lastDisplayID: CGDirectDisplayID = 0
     private var captureDisplayID: CGDirectDisplayID = 0
@@ -159,9 +163,18 @@ final class ConnectionManager: ObservableObject {
         streamActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
             reason: "Передача второго экрана на телевизор")
         capturedFPS = nil; admittedFPS = nil; outputFPS = nil; renderedFPS = nil
-        previousReport = nil; previousSample = nil
+        previousReport = nil; previousSample = nil; lastReportTime = nil; sourceRefresh = nil
+        journal = try? StreamJournal(mode: mode, audio: audio)
         let current = UUID(); token = current
         let transport = StreamTransport(); self.transport = transport
+        let sessionJournal = journal
+        transport.frameTrace = { trace in
+            sessionJournal?.record(.tvReport, ["trace_omitted": Double(trace.omitted)])
+            for frame in trace.frames {
+                sessionJournal?.record(.tvFrame, ["stage": Double(frame.stage), "pts_us": Double(frame.pts),
+                    "receiver_elapsed_us": Double(frame.elapsedUS)])
+            }
+        }
         transport.failure = { [weak self] reason in Task { @MainActor in
             guard let self, self.token == current else { return }
             await self.stop(reason: reason)
@@ -180,6 +193,9 @@ final class ConnectionManager: ObservableObject {
                 self.renderedFPS = report.rendered > 0 ? rates.1 : nil
             }
             self.previousReport = report
+            self.lastReportTime = ProcessInfo.processInfo.systemUptime
+            self.journal?.record(.tvReport, ["output_frames": Double(report.output),
+                "rendered_frames": Double(report.rendered), "receiver_elapsed_us": Double(report.elapsedUS)])
         } }
         transport.keyframeRequested = { [weak self] in Task { @MainActor in
             guard let self, self.token == current else { return }
@@ -295,7 +311,10 @@ final class ConnectionManager: ObservableObject {
             try Task.checkCancellation()
             guard token == current, let display = content.displays.first(where: { $0.displayID == id }) else { throw StreamError.unavailable }
             stage = .encoder
-            let encoder = try FramePipeline(transport: transport, mode: mode, audio: audio, paceFrames: handle != nil && mode.fps < 60)
+            let refresh = CGDisplayCopyDisplayMode(id)?.refreshRate ?? 0
+            sourceRefresh = refresh > 0 && refresh.isFinite ? refresh : nil
+            let encoder = try FramePipeline(transport: transport, mode: mode, audio: audio,
+                sourceFPS: sourceRefresh.map { Int($0.rounded()) } ?? 60, journal: journal)
             pipeline = encoder
             let failure: (String) -> Void = { [weak self] reason in Task { @MainActor in
                 guard let self, self.token == current else { return }
@@ -324,23 +343,41 @@ final class ConnectionManager: ObservableObject {
             guard token == current else { throw CancellationError() }
             status = "Второй экран подключён · \(mode.title) · звук \(audio ? "включён" : "выключен")"
             previousSample = (ProcessInfo.processInfo.systemUptime, encoder.capturedCount, encoder.counts.0, encoder.processing.bytes)
+            previousEncodedFrames = encoder.snapshot.codecFrames
             monitor = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self, let pipeline = self.pipeline else { return }
-                    let count = pipeline.counts
-                    let processing = pipeline.processing
+                    guard self.token == current, self.active else { return }
+                    let snapshot = pipeline.snapshot
                     var encodedMbps: Double?
-                    let now = ProcessInfo.processInfo.systemUptime, captured = pipeline.capturedCount
+                    let now = ProcessInfo.processInfo.systemUptime, captured = snapshot.captured
+                    var fields = snapshot.numbers
+                    fields["target_fps"] = Double(self.configuredMode.fps)
+                    fields["source_refresh_hz"] = self.sourceRefresh
                     if let previous = self.previousSample, now > previous.time {
                         self.capturedFPS = Double(captured - previous.captured) / (now - previous.time)
-                        self.admittedFPS = Double(count.0 - previous.admitted) / (now - previous.time)
-                        encodedMbps = Double(processing.bytes - previous.bytes) * 8 / (now - previous.time) / 1_000_000
+                        self.admittedFPS = Double(snapshot.admitted - previous.admitted) / (now - previous.time)
+                        encodedMbps = Double(snapshot.bytes - previous.bytes) * 8 / (now - previous.time) / 1_000_000
+                        fields["interval_s"] = now - previous.time
+                        fields["encoded_fps"] = Double(snapshot.codecFrames - self.previousEncodedFrames) / (now - previous.time)
                     }
-                    self.previousSample = (now, captured, count.0, processing.bytes)
+                    self.previousEncodedFrames = snapshot.codecFrames
+                    self.previousSample = (now, captured, snapshot.admitted, snapshot.bytes)
+                    if let reportTime = self.lastReportTime {
+                        fields["tv_report_age_s"] = now - reportTime
+                        if now - reportTime > 2.5 { self.outputFPS = nil; self.renderedFPS = nil }
+                    }
+                    fields["capture_fps"] = self.capturedFPS; fields["admission_fps"] = self.admittedFPS
+                    fields["output_fps"] = self.outputFPS; fields["surface_fps"] = self.renderedFPS
+                    fields["video_mbps"] = encodedMbps
                     func fps(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "нет данных" }
-                    self.statistics = "Кадры/с · захват Mac: \(fps(self.capturedFPS)) · приём декодера: \(fps(self.admittedFPS)) · выход декодера: \(fps(self.outputFPS)) · Surface ТВ: \(fps(self.renderedFPS))\nПринято: \(count.0) кадров · пропущено до передачи: \(count.1)"
+                    self.statistics = "Кадры/с · захват Mac: \(fps(self.capturedFPS)) · приём декодера: \(fps(self.admittedFPS)) · выход декодера: \(fps(self.outputFPS)) · Surface ТВ: \(fps(self.renderedFPS))\nПринято: \(snapshot.admitted) · заменено до кодирования: \(snapshot.replaced) · пропущено кодером: \(snapshot.codecDropped)"
                     let frames = self.output?.frameCounts ?? (complete: 0, idle: 0, other: 0)
-                    self.processingStatistics = "Видеопоток, кодирование: \(fps(encodedMbps)) Мбит/с\nКодирование, p95: \(fps(processing.encoder.p95MS)) мс · подтверждение ТВ, p95: \(fps(processing.admission.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(processing.frames)"
+                    fields["capture_complete"] = Double(frames.complete); fields["capture_idle"] = Double(frames.idle)
+                    fields["capture_other"] = Double(frames.other)
+                    self.journal?.record(.sample, fields)
+                    self.processingStatistics = "Видеопоток, кодирование: \(fps(encodedMbps)) Мбит/с\nКодирование, p95: \(fps(snapshot.encoderLatency.p95MS)) мс · подтверждение ТВ, p95: \(fps(snapshot.admissionLatency.p95MS)) мс\nЗахват: \(frames.complete) готовых · \(frames.idle) без обновления · \(frames.other) прочих · закодировано: \(snapshot.codecFrames)\nВыбрано лимитом \(self.configuredMode.fps): \(snapshot.selected) · исключено лимитом: \(snapshot.selectionSkipped)"
+                    if self.journal?.available != true { self.processingStatistics += "\nЖурнал сеанса недоступен" }
                 }
             }
             startTask = nil
@@ -375,11 +412,18 @@ final class ConnectionManager: ObservableObject {
             UserDefaults.standard.set(reason, forKey: "displayLastFailure")
         }
         monitor?.invalidate(); monitor = nil
+        let sessionJournal = journal; journal = nil
+        let ownedDisplay = handle != nil ? captureDisplayID : nil
         testWindow?.close(); testWindow = nil
         if let originalCursor { CGWarpMouseCursorPosition(originalCursor); self.originalCursor = nil }
         let stream = capture; capture = nil
-        if let stream { try? await stream.stopCapture() }
-        pipeline?.stop(); pipeline = nil; output = nil
+        var captureStopped = true
+        if let stream {
+            do { try await stream.stopCapture() } catch { captureStopped = false }
+        }
+        pipeline?.stop()
+        let finalCounts = pipeline?.snapshot.numbers ?? [:]
+        pipeline = nil; output = nil
         await transport?.stopAndWait(); transport = nil
         if let handle {
             let releasedID = captureDisplayID
@@ -391,6 +435,17 @@ final class ConnectionManager: ObservableObject {
             }
         }
         captureDisplayID = 0
+        var endFields = finalCounts
+        endFields["normal_stop"] = reason == "Остановлено" ? 1 : 0
+        endFields["capture_released"] = capture == nil ? 1 : 0
+        endFields["capture_stop_succeeded"] = captureStopped ? 1 : 0
+        endFields["pipeline_released"] = pipeline == nil ? 1 : 0
+        endFields["transport_released"] = transport == nil ? 1 : 0
+        endFields["display_released"] = handle == nil ? 1 : 0
+        if let ownedDisplay, let present = DisplayTopology.contains(ownedDisplay) {
+            endFields["display_removed"] = present ? 0 : 1
+        }
+        await sessionJournal?.finish(endFields)
         if let activity = streamActivity { ProcessInfo.processInfo.endActivity(activity); streamActivity = nil }
         active = false; decodedOnTV = false; statistics = ""; processingStatistics = ""; status = reason
         capturedFPS = nil; admittedFPS = nil; outputFPS = nil; renderedFPS = nil

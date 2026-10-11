@@ -15,7 +15,7 @@ struct CoreCheck {
         precondition(credits.markWritten(3) == .waiting && credits.markWritten(3) == .invalid)
         precondition(credits.acknowledge(3) == .complete && credits.acknowledge(3) == .invalid)
 
-        for fps in [30, 50] {
+        for fps in [30, 50, 60] {
             var selector = FrameRateSelector(), accepted = 0
             for frame in 0..<600 {
                 let jitter = frame % 2 == 0 ? 0.0001 : -0.0001
@@ -26,6 +26,11 @@ struct CoreCheck {
             precondition(!selector.accepts(100, fps: fps))
             precondition(selector.accepts(120, fps: fps))
             precondition(!selector.accepts(120.001, fps: fps), "A stall must not cause a replay burst")
+            var fastSource = FrameRateSelector(), fastAccepted = 0
+            for frame in 0..<1200 {
+                if fastSource.accepts(Double(frame) / 120, fps: fps) { fastAccepted += 1 }
+            }
+            precondition(fastAccepted == fps * 10, "A faster source must still obey the chosen limit")
         }
 
         var cadence = FrameCadence()
@@ -68,6 +73,15 @@ struct CoreCheck {
         precondition(next.rates(since: report)?.0 == 60 && next.rates(since: report)?.1 == 59)
         precondition(report.rates(since: next) == nil)
         do { _ = try TVFrameReport.parse(Data(count: 23)); preconditionFailure() } catch {}
+        var traceBytes = Data()
+        for value in [UInt64(7), 0, 1234, 100, 1, 1234, 500] { Wire.append(value, to: &traceBytes) }
+        let trace = try TVFrameTrace.parse(traceBytes)
+        precondition(trace.omitted == 7 && trace.frames.count == 2 && trace.frames[1].elapsedUS == 500)
+        for bytes in [Data(count: 7), Data(count: 9), Data(count: TVFrameTrace.maximumBytes + 24)] {
+            do { _ = try TVFrameTrace.parse(bytes); preconditionFailure("Invalid TV trace accepted") } catch {}
+        }
+        traceBytes[15] = 3 // Unknown stage must not silently corrupt frame matching.
+        do { _ = try TVFrameTrace.parse(traceBytes); preconditionFailure() } catch {}
         let native60 = StreamMode(width: 1366, height: 768, fps: 60)
         let native50 = StreamMode(width: 1366, height: 768, fps: 50)
         precondition(native50.valid && native50.level == "4.1")

@@ -22,6 +22,7 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
     private val telemetry = FrameTelemetry()
     private var lastReportNS = 0L
     private var reportsEnabled = false
+    private var frameTraceEnabled = false
     private val renderHandler = android.os.Handler(android.os.Looper.getMainLooper())
     @Volatile private var active = false
     val isRunning get() = active
@@ -172,7 +173,7 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
                     decodeHandler?.post { feedDecoder() }
                     lastPTS = header.pts
                 }
-                3 -> { packetStage = 6; require(header.length == 0 && header.flags == 0); receipt(0x41) }
+                3 -> { packetStage = 6; require(header.length == 0 && header.flags == 0); receipt(0x41); reportFrames() }
                 4 -> {
                     packetStage = 5
                     require(header.epoch == epoch && header.pts > lastAudioPTS && audio != null)
@@ -196,10 +197,14 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
         // Feed updated SPS/PPS in-band with the next IDR, without reallocating MediaCodec.
         if (!initialize) {
             require(reportsEnabled == config.optBoolean("telemetry", false))
+            require(frameTraceEnabled == config.optBoolean("frame_trace", false))
             return parameterSets
         }
         // Old senders do not request reports and never receive unknown receipts.
         reportsEnabled = config.optBoolean("telemetry", false)
+        frameTraceEnabled = config.optBoolean("frame_trace", false)
+        require(!frameTraceEnabled || reportsEnabled)
+        telemetry.enableTrace(frameTraceEnabled)
         val info = StreamModes.decoder(mode) ?: error("Hardware AVC mode unavailable")
         val format = MediaFormat.createVideoFormat("video/avc", mode.width, mode.height).apply {
             setByteBuffer("csd-0", ByteBuffer.wrap(sps)); setByteBuffer("csd-1", ByteBuffer.wrap(pps))
@@ -235,7 +240,7 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
                     override fun onOutputBufferAvailable(owner: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
                         if (!active || codec !== owner) return
                         try {
-                            telemetry.output()
+                            telemetry.output(info.presentationTimeUs)
                             owner.releaseOutputBuffer(index, true)
                             if (firstFrame) {
                                 firstFrame = false; receipt(0x50)
@@ -278,6 +283,7 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
                 require(buffer.remaining() >= frame.bytes.size)
                 buffer.put(frame.bytes)
                 decoder.queueInputBuffer(index, 0, frame.bytes.size, frame.pts, 0)
+                telemetry.admitted(frame.pts)
                 synchronized(receiptLock) { socket?.outputStream?.write(StreamProtocol.admissionReceipt(frame.pts)) }
             }
         } catch (error: Exception) { decoderFailed(error) }
@@ -288,11 +294,11 @@ class StreamReceiver(private val surface: Surface, private val pin: String, priv
         recordFailure(code); runCatching { receipt(0xE2) }
         stop(); status("Декодер остановлен ($code). Повторите подключение.")
     }
-    private fun reportFrames() {
+    @Synchronized private fun reportFrames() {
         val now = System.nanoTime()
         if (!active || !reportsEnabled || now - lastReportNS < 1_000_000_000L) return
         lastReportNS = now
-        val report = telemetry.report(now)
+        val report = telemetry.report(now) + (telemetry.takeTrace() ?: ByteArray(0))
         synchronized(receiptLock) { socket?.outputStream?.write(report) }
     }
     private class FrameBackpressureTimeout : Exception()
