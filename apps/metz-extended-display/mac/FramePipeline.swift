@@ -116,6 +116,9 @@ final class FramePipeline: @unchecked Sendable {
             let properties: [(CFString, CFTypeRef)] = [
                 (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue),
                 (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse),
+                // Low-latency rate control does not bound decoder reference buffers.
+                // Keep the emitted decoder buffer requirement small for live display.
+                (kVTCompressionPropertyKey_ReferenceBufferCount, NSNumber(value: 1)),
                 (kVTCompressionPropertyKey_ProfileLevel, ("H264_Baseline_" + mode.level.replacingOccurrences(of: ".", with: "_")) as CFString),
                 (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: mode.width * mode.height * mode.fps / 9)),
                 (kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: mode.fps)),
@@ -252,7 +255,8 @@ final class FramePipeline: @unchecked Sendable {
             encoderLatency.record(seconds: completed - encodingBegan)
             lock.unlock()
             journal?.record(.encoded, ["frame": Double(encodingFrameID), "pts_us": Double(us),
-                "bytes": Double(packets.count), "encode_ms": (completed - encodingBegan) * 1000])
+                "bytes": Double(packets.count), "encode_ms": (completed - encodingBegan) * 1000,
+                "keyframe": key ? 1 : 0])
             encoding = false
             queuedPacket = (packets, UInt64(us), encodingFrameID, completed)
             sendNext()

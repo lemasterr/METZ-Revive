@@ -32,6 +32,37 @@ private final class EncoderSink: FramePacketTransport {
     func snapshot() -> ([String: Any], String?) { lock.lock(); defer { lock.unlock() }; return (configuration, error) }
 }
 
+// Verify the hardware's emitted Baseline SPS, rather than only a setter return code.
+private func baselineReferenceFrames(_ data: Data) -> Int {
+    let nal = [UInt8](data)
+    precondition(nal.count > 5 && Array(nal.prefix(4)) == [0, 0, 0, 1] && nal[4] & 31 == 7)
+    var rbsp: [UInt8] = [], zeros = 0
+    for byte in nal.dropFirst(5) {
+        if zeros >= 2 && byte == 3 { zeros = 0; continue }
+        rbsp.append(byte); zeros = byte == 0 ? zeros + 1 : 0
+    }
+    var bit = 0
+    func read(_ count: Int = 1) -> Int {
+        precondition(bit + count <= rbsp.count * 8)
+        var value = 0
+        for _ in 0..<count {
+            value = value * 2 + Int((rbsp[bit / 8] >> (7 - bit % 8)) & 1); bit += 1
+        }
+        return value
+    }
+    func unsignedGolomb() -> Int {
+        var count = 0
+        while read() == 0 { count += 1; precondition(count < 32) }
+        return (1 << count) - 1 + read(count)
+    }
+    precondition(read(8) == 66, "Generated stream must remain Baseline")
+    _ = read(16); _ = unsignedGolomb(); _ = unsignedGolomb()
+    let orderType = unsignedGolomb()
+    precondition(orderType == 0 || orderType == 2)
+    if orderType == 0 { _ = unsignedGolomb() }
+    return unsignedGolomb()
+}
+
 private final class HeldFrameSink: FramePacketTransport {
     private let lock = NSLock()
     let frameCapacity: Int
@@ -117,6 +148,8 @@ struct EncoderCheck {
                 precondition(error == nil, "Encoder failure")
                 precondition(config["width"] as? Int == mode.width && config["height"] as? Int == mode.height && config["fps"] as? Int == mode.fps)
                 precondition(config["profile"] as? String == "baseline-" + mode.level)
+                precondition(baselineReferenceFrames(Data(base64Encoded: config["sps"] as! String)!) == 1,
+                    "Hardware encoder must emit one reference buffer")
             }
             pipeline.stop()
             print("Hardware generated frames passed: \(mode.id), pixel format \(pixelFormat)")
