@@ -1,6 +1,6 @@
 # METZ Extended Display
 
-11 октября2026: **Manager0.9.7/build21 установлен**, TVDisplay0.7.4/code29 сохранён. Отдельный clock30/50/60 выбирает последний кадр с фазовым запасом; новые samples и повторы считаются отдельно. Четыре коротких generated-bar/audio/start-stop-restart сеанса дали output≈30/30/60/60, при60 всего1–2 повтора за сеанс. Cleanup/normal close прошли; output паузы≈76–87мс, Surface и пользовательская плавность остаются открыты. [Измерения и возврат](../../docs/FRAME_CLOCK_PROBE.md).
+11 октября2026: **Manager0.9.8/build22 и TVDisplay0.7.6/code31 установлены**. ACK/report TLS writes вынесены из codec callbacks в bounded writer; standard low-latency request имеет configure/start fallback. Mac capture — explicit60Hz/NV12, журнал измеряет displayTime delivery. Builds/core/JVM/hardware fixtures/Python/signatures и install readback прошли; HOME/IME/data/hour timer сохранены. Новая реальная плавность/задержка ещё не проверена. [Проба и возврат](../../docs/STREAM_LATENCY_PROBE.md).
 
 11 октября2026: в общем движке Manager добавлен ограниченный автоматический числовой журнал каждого сеанса. Текущая установленная пара — Manager0.9.5/build19 / TVDisplay0.7.4/code29. Паузы декодера воспроизведены, плавность не объявлена исправленной. [Запись, измерения и возврат](../../docs/STREAM_FRAME_JOURNAL.md).
 

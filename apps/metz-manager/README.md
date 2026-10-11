@@ -1,6 +1,6 @@
-# METZ Manager 0.9.7
+# METZ Manager 0.9.8
 
-11 октября2026: **Manager0.9.7/build21 установлен**, TVDisplay0.7.4/code29 сохранён. Отдельный clock30/50/60 выбирает последний кадр с фазовым запасом; новые samples и повторы считаются отдельно. Четыре коротких generated-bar/audio/start-stop-restart сеанса дали output≈30/30/60/60, при60 всего1–2 повтора за сеанс. Cleanup/normal close прошли; output паузы≈76–87мс, Surface и пользовательская плавность остаются открыты. [Измерения и возврат](../../docs/FRAME_CLOCK_PROBE.md).
+11 октября2026: **Manager0.9.8/build22 и TVDisplay0.7.6/code31 установлены**. ACK/report TLS writes вынесены из codec callbacks в bounded writer; standard low-latency request имеет configure/start fallback. Mac capture — explicit60Hz/NV12, журнал измеряет displayTime delivery. Builds/core/JVM/hardware fixtures/Python/signatures и install readback прошли; HOME/IME/data/hour timer сохранены. Новая реальная плавность/задержка ещё не проверена. [Проба и возврат](../../docs/STREAM_LATENCY_PROBE.md).
 
 11 октября2026: установлен build19 с автоматической записью числового журнала при каждом запуске экрана. Журнал ограничен последними8сеансами, без сохранения изображения/звука. TVDisplay0.7.4/code29 сохраняет прежнюю обработку SPS/PPS после неудачной пробы; реальная неровность вывода остаётся открытой. [Как прочитать запись и результаты](../../docs/STREAM_FRAME_JOURNAL.md).
 
